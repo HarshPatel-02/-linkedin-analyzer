@@ -33,21 +33,34 @@ def run_apify_actor(profile_url: str) -> dict:
     username = profile_url.rstrip("/").split("/")[-1]
     client = _get_client()
 
-    for actor_id in (APIFY_ACTOR_ID, APIFY_COMPANY_ACTOR_ID):
-        if not actor_id:
-            continue
+    actor_id = os.getenv("APIFY_ACTOR_ID")
+    company_actor_id = os.getenv("APIFY_COMPANY_ACTOR_ID")
+
+    last_error = None
+    for aid in filter(None, [actor_id, company_actor_id]):
         try:
-            run = client.actor(actor_id).call(run_input={
+            run = client.actor(aid).call(run_input={
                 "profiles": [username],
                 "isEmailRequired": False,
             })
+
+            # ✅ Try defaultDatasetId first
             for item in client.dataset(run["defaultDatasetId"]).iterate_items():
                 if item:
                     return _normalize_datadoping(item, username)
-        except Exception:
-            pass
 
-    raise Exception("No data returned from Apify profile actor")
+            # ✅ Fallback: fetch directly via run ID (fixes LIMITED_PERMISSIONS issue)
+            run_info = client.run(run["id"]).get()
+            dataset_id = run_info.get("defaultDatasetId") or run["defaultDatasetId"]
+            for item in client.dataset(dataset_id).list_items().items:
+                if item:
+                    return _normalize_datadoping(item, username)
+
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise Exception(f"No data returned from Apify profile actor. Last error: {last_error}")
 
 def run_posts_actor(profile_url: str) -> list:
     try:
