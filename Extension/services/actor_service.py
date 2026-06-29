@@ -14,7 +14,7 @@ def _normalize_datadoping(item: dict, username: str) -> dict:
     if isinstance(loc, dict):
         item["location"] = loc.get("full") or loc.get("country") or ""
         item["city"] = loc.get("city") or ""
-    item["name"] = item.get("fullname") or ""
+    item["name"] = item.get("fullname") or item.get("fullName") or item.get("name") or ""
     item["position"] = item.get("headline", "")
     item["followers"] = item.get("follower_count", 0)
     item["connections"] = item.get("connection_count", 0)
@@ -35,7 +35,7 @@ def run_apify_actor(profile_url: str) -> dict:
                 "isEmailRequired": False,
             })
             for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-                if item.get("fullname") or item.get("first_name"):
+                if item.get("fullname") or item.get("fullName") or item.get("name") or item.get("first_name"):
                     return _normalize_datadoping(item, username)
         except Exception:
             pass
