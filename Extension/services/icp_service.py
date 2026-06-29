@@ -180,7 +180,7 @@ def run_company_actor(profile_url: str) -> dict:
             "profiles": [username],
             "isEmailRequired": False,
         })
-        for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+        for item in client.dataset(run.default_dataset_id).iterate_items():
             # Map actor field names → standardized keys
             emp_count = item.get("current_company_employee_count")
             if emp_count is not None:

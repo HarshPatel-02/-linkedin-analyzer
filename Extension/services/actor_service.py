@@ -44,15 +44,7 @@ def run_apify_actor(profile_url: str) -> dict:
                 "isEmailRequired": False,
             })
 
-            # ✅ Try defaultDatasetId first
-            for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-                if item:
-                    return _normalize_datadoping(item, username)
-
-            # ✅ Fallback: fetch directly via run ID (fixes LIMITED_PERMISSIONS issue)
-            run_info = client.run(run["id"]).get()
-            dataset_id = run_info.get("defaultDatasetId") or run["defaultDatasetId"]
-            for item in client.dataset(dataset_id).list_items().items:
+            for item in client.dataset(run.default_dataset_id).iterate_items():
                 if item:
                     return _normalize_datadoping(item, username)
 
@@ -75,7 +67,7 @@ def run_posts_actor(profile_url: str) -> list:
             "postedLimitDate": limit_date,
         })
         posts = []
-        for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+        for item in client.dataset(run.default_dataset_id).iterate_items():
             posts.append(item)
 
         return posts
