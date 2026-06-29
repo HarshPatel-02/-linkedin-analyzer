@@ -9,6 +9,13 @@ APIFY_ACTOR_ID         = os.getenv("APIFY_ACTOR_ID")
 APIFY_POSTS_ACTOR_ID   = os.getenv("APIFY_POSTS_ACTOR_ID")
 APIFY_COMPANY_ACTOR_ID = os.getenv("APIFY_COMPANY_ACTOR_ID")
 
+
+def _get_client():
+    token = os.getenv("APIFY_API_TOKEN")
+    if not token:
+        raise Exception("APIFY_API_TOKEN is not set in environment variables")
+    return ApifyClient(token)
+
 def _normalize_datadoping(item: dict, username: str) -> dict:
     loc = item.get("location", {})
     if isinstance(loc, dict):
@@ -24,7 +31,7 @@ def _normalize_datadoping(item: dict, username: str) -> dict:
 
 def run_apify_actor(profile_url: str) -> dict:
     username = profile_url.rstrip("/").split("/")[-1]
-    client = ApifyClient(APIFY_API_TOKEN)
+    client = _get_client()
 
     for actor_id in (APIFY_ACTOR_ID, APIFY_COMPANY_ACTOR_ID):
         if not actor_id:
@@ -48,7 +55,7 @@ def run_posts_actor(profile_url: str) -> list:
 
         limit_date = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
 
-        client = ApifyClient(APIFY_API_TOKEN)
+        client = _get_client()
         run = client.actor(APIFY_POSTS_ACTOR_ID).call(run_input={
             "targetUrls":      [profile_url],
             "maxPosts":        20,
