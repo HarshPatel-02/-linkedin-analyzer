@@ -9,40 +9,37 @@ APIFY_ACTOR_ID         = os.getenv("APIFY_ACTOR_ID")
 APIFY_POSTS_ACTOR_ID   = os.getenv("APIFY_POSTS_ACTOR_ID")
 APIFY_COMPANY_ACTOR_ID = os.getenv("APIFY_COMPANY_ACTOR_ID")
 
+def _normalize_datadoping(item: dict, username: str) -> dict:
+    loc = item.get("location", {})
+    if isinstance(loc, dict):
+        item["location"] = loc.get("full") or loc.get("country") or ""
+        item["city"] = loc.get("city") or ""
+    item["name"] = item.get("fullname") or ""
+    item["position"] = item.get("headline", "")
+    item["followers"] = item.get("follower_count", 0)
+    item["connections"] = item.get("connection_count", 0)
+    item["avatar"] = item.get("profile_picture_url", "")
+    item["mutual_connections"] = item.get("mutual_connections", 0)
+    return item
+
 def run_apify_actor(profile_url: str) -> dict:
+    username = profile_url.rstrip("/").split("/")[-1]
     client = ApifyClient(APIFY_API_TOKEN)
-    try:
-        run = client.actor(APIFY_ACTOR_ID).call(run_input={
-            "urls": [profile_url],
-            "resolveEmails": False,
-        })
-        for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-            if item.get("name") or item.get("first_name"):
-                return item
-    except Exception:
-        pass
-    try:
-        username = profile_url.rstrip("/").split("/")[-1]
-        client2 = ApifyClient(APIFY_API_TOKEN)
-        run2 = client2.actor(APIFY_COMPANY_ACTOR_ID).call(run_input={
-            "profiles": [username],
-            "isEmailRequired": False,
-        })
-        for item in client2.dataset(run2["defaultDatasetId"]).iterate_items():
-            if item.get("fullname") or item.get("first_name"):
-                loc = item.get("location", {})
-                if isinstance(loc, dict):
-                    item["location"] = loc.get("full") or loc.get("country") or ""
-                    item["city"] = loc.get("city") or ""
-                item["name"] = item.get("fullname") or ""
-                item["position"] = item.get("headline", "")
-                item["followers"] = item.get("follower_count", 0)
-                item["connections"] = item.get("connection_count", 0)
-                item["avatar"] = item.get("profile_picture_url", "")
-                item["mutual_connections"] = item.get("mutual_connections", 0)
-                return item
-    except Exception:
-        pass
+
+    for actor_id in (APIFY_ACTOR_ID, APIFY_COMPANY_ACTOR_ID):
+        if not actor_id:
+            continue
+        try:
+            run = client.actor(actor_id).call(run_input={
+                "profiles": [username],
+                "isEmailRequired": False,
+            })
+            for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+                if item.get("fullname") or item.get("first_name"):
+                    return _normalize_datadoping(item, username)
+        except Exception:
+            pass
+
     raise Exception("No data returned from Apify profile actor")
 
 def run_posts_actor(profile_url: str) -> list:
