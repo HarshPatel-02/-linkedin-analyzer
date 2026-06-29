@@ -35,7 +35,7 @@ def run_apify_actor(profile_url: str) -> dict:
                 "isEmailRequired": False,
             })
             for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-                if item.get("fullname") or item.get("fullName") or item.get("name") or item.get("first_name"):
+                if item:
                     return _normalize_datadoping(item, username)
         except Exception:
             pass
