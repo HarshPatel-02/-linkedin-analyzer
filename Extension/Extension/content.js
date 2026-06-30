@@ -183,7 +183,7 @@ async function handleAnalyzeClick() {
     const cached = await cacheGet(cacheKey);
     if (cached) { renderPanel(cached); return; }
 
-    setStatus("Fetching data..");
+    setStatus("Calculating Activity Score..");
 
     const resp = await fetch(`${API_BASE_URL}/analyze`, {
       method: "POST",
