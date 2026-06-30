@@ -15,13 +15,14 @@ function injectStyles() {
   const style = document.createElement("style");
   style.id = "li-ai-styles";
   style.textContent = `
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
     #li-ai-analyze-btn, #li-icp-btn {
       display:inline-flex;align-items:center;justify-content:center;
       gap:6px;padding:0 16px;height:34px;
       border:1.5px solid #0a66c2;border-radius:999px;
       background:#fff;color:#0a66c2;cursor:pointer;
       font-size:13px;font-weight:600;
-      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
       transition:all .15s ease;
       white-space:nowrap;flex-shrink:0;z-index:9999;position:relative;align-self:center;
     }
@@ -31,7 +32,7 @@ function injectStyles() {
     #li-ai-panel, #li-icp-panel{
       margin:12px 0;border-radius:10px;border:1px solid #e5e7eb;
       background:#fff;box-shadow:0 2px 16px rgba(0,0,0,.06);overflow:hidden;
-      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     }
     .panel-header{padding:18px 22px;background:#0a66c2;color:#fff;display:flex;justify-content:space-between;align-items:center;}
     .panel-header span{font-weight:700;font-size:20px!important;letter-spacing:-.2px;}
@@ -104,8 +105,8 @@ function scoreCircle(score, max, color) {
       <circle cx="56" cy="56" r="${r}" fill="none" stroke="${color}" stroke-width="7"
         stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
         stroke-linecap="round" transform="rotate(-90 56 56)"/>
-      <text x="56" y="53" text-anchor="middle" font-size="28" font-weight="800" fill="${color}" font-family="-apple-system,sans-serif">${score}</text>
-      <text x="56" y="70" text-anchor="middle" font-size="12" fill="#9ca3af" font-family="-apple-system,sans-serif">/${max}</text>
+      <text x="56" y="53" text-anchor="middle" font-size="28" font-weight="800" fill="${color}" font-family="Inter,-apple-system,sans-serif">${score}</text>
+      <text x="56" y="70" text-anchor="middle" font-size="12" fill="#9ca3af" font-family="Inter,-apple-system,sans-serif">/${max}</text>
     </svg>`;
 }
 
@@ -147,14 +148,14 @@ async function handleAnalyzeClick() {
   panel.id = "li-ai-panel";
   panel.innerHTML = `
     <div class="panel-header">
-      <span>⚡ Activity Score</span>
+      <span>Activity Score</span>
       <button class="panel-close" id="li-ai-close">×</button>
     </div>
     <div class="panel-body" id="li-ai-body">
       <div style="display:flex;flex-direction:column;gap:10px;padding:16px;">
         <div style="display:flex;align-items:center;gap:10px;color:#6b7280;">
           <div style="width:16px;height:16px;border:2.5px solid #e5e7eb;border-top-color:#0a66c2;border-radius:50%;animation:li-spin .7s linear infinite;flex-shrink:0;"></div>
-          <span id="li-ai-status">Fetching profile data...</span>
+          <span id="li-ai-status">Calculating Activity Score...</span>
         </div>
        
       </div>
@@ -222,7 +223,7 @@ async function ICPButton() {
   panel.id = "li-icp-panel";
   panel.innerHTML = `
     <div class="panel-header" style="background:#059669;">
-      <span>🎯 ICP Score</span>
+      <span>ICP Score</span>
       <button class="panel-close" id="li-icp-close">×</button>
     </div>
     <div class="panel-body" id="li-icp-body">
