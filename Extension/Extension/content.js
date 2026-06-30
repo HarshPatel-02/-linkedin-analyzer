@@ -93,6 +93,22 @@ function safeUrl(u) {
   } catch { return "#"; }
 }
 
+function scoreCircle(score, max, color) {
+  const pct  = Math.min(score / max, 1);
+  const r    = 42;
+  const circ = 2 * Math.PI * r;
+  const off  = circ * (1 - pct);
+  return `
+    <svg width="112" height="112" viewBox="0 0 112 112" style="flex-shrink:0;">
+      <circle cx="56" cy="56" r="${r}" fill="none" stroke="#e5e7eb" stroke-width="7"/>
+      <circle cx="56" cy="56" r="${r}" fill="none" stroke="${color}" stroke-width="7"
+        stroke-dasharray="${circ.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
+        stroke-linecap="round" transform="rotate(-90 56 56)"/>
+      <text x="56" y="53" text-anchor="middle" font-size="28" font-weight="800" fill="${color}" font-family="-apple-system,sans-serif">${score}</text>
+      <text x="56" y="70" text-anchor="middle" font-size="12" fill="#9ca3af" font-family="-apple-system,sans-serif">/${max}</text>
+    </svg>`;
+}
+
 // ─── Buttons ──────────────────────────────────────────────────────────────────
 function activityButton() {
   if (!isProfilePage()) return;
@@ -131,7 +147,7 @@ async function handleAnalyzeClick() {
   panel.id = "li-ai-panel";
   panel.innerHTML = `
     <div class="panel-header">
-      <span>⚡ Activity</span>
+      <span>⚡ Activity Score</span>
       <button class="panel-close" id="li-ai-close">×</button>
     </div>
     <div class="panel-body" id="li-ai-body">
@@ -257,13 +273,21 @@ async function ICPButton() {
         </div>`;
     }).join("");
 
+    const icpColor = result.icp_score >= 70 ? "#059669" : result.icp_score >= 40 ? "#eab308" : "#dc2626";
+    const icpLabel = result.icp_score >= 70 ? "Good Match" : result.icp_score >= 40 ? "Need Nurturing" : "Poor Match";
+    const icpSub   = result.icp_score >= 70 ? "This lead aligns well with your ideal customer profile." : result.icp_score >= 40 ? "Build engagement to improve outreach success." : "This lead is outside your ideal customer profile.";
     document.getElementById("li-icp-body").innerHTML = `
       <div style="padding:16px;">
-        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
-          <div style="font-size:36px;font-weight:800;color:${result.icp_score >= 70 ? "#059669" : result.icp_score >= 40 ? "#f59e0b" : "#dc2626"};">${result.icp_score}</div>
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;">
+          ${scoreCircle(result.icp_score, 100, icpColor)}
           <div>
-            <div style="font-size:11px;color:#9ca3af;">out of 100</div>
-            <div style="font-size:14px;font-weight:700;color:#374151;">ICP</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+              <span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:4px;background:${icpColor}1a;border:1px solid ${icpColor}40;">
+                <span style="width:7px;height:7px;border-radius:50%;background:${icpColor};display:inline-block;flex-shrink:0;"></span>
+                <span style="font-size:13px;font-weight:700;color:#111827;">${escHtml(icpLabel)}</span>
+              </span>
+            </div>
+            <div style="font-size:12px;color:#6b7280;line-height:1.4;">${escHtml(icpSub)}</div>
           </div>
         </div>
         ${rows}
@@ -321,7 +345,7 @@ function renderPanel(data) {
   // Colors
   let scoreColor = "#dc2626";
   if (score_total >= 70) scoreColor = "#16a34a";
-  else if (score_total >= 40) scoreColor = "#f59e0b";
+  else if (score_total >= 40) scoreColor = "#eab308";
 
   // Activity HTML
   let activityHTML = escHtml(activity);
@@ -330,7 +354,7 @@ function renderPanel(data) {
   } else if (activity.includes("ago") || activity.toLowerCase().includes("today") || activity.toLowerCase().includes("yesterday")) {
     activityHTML = `<strong style="color:#16a34a;">⏱️ ${escHtml(activity)}</strong>`;
   } else if (activity.toLowerCase().includes("recent")) {
-    activityHTML = `<strong style="color:#f59e0b;">⏱️ ${escHtml(activity)}</strong>`;
+    activityHTML = `<strong style="color:#eab308;">⏱️ ${escHtml(activity)}</strong>`;
   }
 
   // Score breakdown rows
@@ -359,18 +383,21 @@ function renderPanel(data) {
     `;
   }).join("");
 
-  document.getElementById("li-ai-body").innerHTML = `
+  const cleanLabel = score_total >= 70 ? "Ready to Engage" : score_total >= 40 ? "Needs Nurturing" : "Difficult to Engage";
+  const actSub     = score_total >= 70 ? "High outreach potential — great time to connect." : score_total >= 40 ? "Moderate potential — consider warming up first." : "Low engagement may not respond well.";
 
-    <!-- Outreach Readiness Score -->
-    <div style="background:#f9fafb;border-radius:10px;padding:18px;margin-bottom:14px;border-left:5px solid ${scoreColor};">
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#9ca3af;margin-bottom:8px;">
-        📊 Outreach Readiness Score
-      </div>
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
-        <div style="font-size:40px;font-weight:800;color:${scoreColor};line-height:1;">${score_total}</div>
-        <div>
-          <div style="font-size:11px;color:#9ca3af;">out of 100</div>
-          <div style="font-size:16px;color:#374151;font-weight:700;margin-top:2px;">${escHtml(score_label)}</div>
+  document.getElementById("li-ai-body").innerHTML = `
+    <div style="padding:18px;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e5e7eb;">
+        ${scoreCircle(score_total, 100, scoreColor)}
+        <div style="flex:1;">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:4px;background:${scoreColor}1a;border:1px solid ${scoreColor}40;">
+              <span style="width:7px;height:7px;border-radius:50%;background:${scoreColor};display:inline-block;flex-shrink:0;"></span>
+              <span style="font-size:13px;font-weight:700;color:#111827;">${escHtml(cleanLabel)}</span>
+            </span>
+          </div>
+          <div style="font-size:12px;color:#6b7280;line-height:1.5;">${escHtml(actSub)}</div>
         </div>
       </div>
       ${scoreRowsHTML}
