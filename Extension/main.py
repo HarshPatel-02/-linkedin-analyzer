@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import traceback
+import json
+import os
 from dotenv import load_dotenv
 from models import AnalyzeRequest, IcpScore,ProfileData
 from services.actor_service import run_apify_actor, run_posts_actor, map_apify_to_profile
@@ -10,6 +12,42 @@ from services.icp_service import calculate_icp, run_company_actor
 load_dotenv()
 
 app = FastAPI(title="LinkedIn AI Analyzer API")
+
+# ─── Cache ────────────────────────────────────────────────────────────────────
+import time
+_CACHE_FILE = "profile_cache.json"
+_CACHE_TTL  = 7 * 24 * 60 * 60  # 7 days in seconds
+_profile_cache: dict = {}
+_icp_cache: dict = {}
+
+def _load_cache():
+    global _profile_cache, _icp_cache
+    if os.path.exists(_CACHE_FILE):
+        try:
+            data = json.load(open(_CACHE_FILE))
+            _profile_cache = data.get("profile", {})
+            _icp_cache     = data.get("icp", {})
+        except Exception:
+            pass
+
+def _save_cache():
+    try:
+        with open(_CACHE_FILE, "w") as f:
+            json.dump({"profile": _profile_cache, "icp": _icp_cache}, f)
+    except Exception:
+        pass
+
+def _cache_get(store: dict, key: str):
+    entry = store.get(key)
+    if not entry: return None
+    if time.time() - entry.get("ts", 0) > _CACHE_TTL:
+        store.pop(key, None); return None
+    return entry.get("data")
+
+def _cache_set(store: dict, key: str, val):
+    store[key] = {"data": val, "ts": time.time()}
+
+_load_cache()
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,6 +61,10 @@ app.add_middleware(
 async def analyze(data: AnalyzeRequest):
     try:
         if data.profile_url:
+            cache_key = data.profile_url.rstrip("/")
+            cached = _cache_get(_profile_cache, cache_key)
+            if cached: return cached
+
             apify_task = asyncio.to_thread(run_apify_actor, data.profile_url)
             posts_task = asyncio.to_thread(run_posts_actor, data.profile_url)
             apify_data, posts_data = await asyncio.gather(apify_task, posts_task)
@@ -33,7 +75,7 @@ async def analyze(data: AnalyzeRequest):
             allowed = set(ProfileData.model_fields.keys())
             profile = ProfileData(**{k: v for k, v in data.model_dump().items() if k in allowed})
 
-        return {
+        result = {
             "success":            True,
             "avatar":             profile.avatar,
             "name":               profile.name,
@@ -61,6 +103,10 @@ async def analyze(data: AnalyzeRequest):
             "posts_90_days":      profile.posts_90_days,
             "engagement_label":   profile.engagement_label,
         }
+        if data.profile_url:
+            _cache_set(_profile_cache, data.profile_url.rstrip("/"), result)
+            _save_cache()
+        return result
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -70,6 +116,9 @@ async def icp_score(data: IcpScore):
         profile_dict = data.model_dump()
         url = profile_dict.get("profile_url") or profile_dict.get("profileUrl") or ""
         if url:
+            cache_key = url.rstrip("/")
+            cached = _cache_get(_icp_cache, cache_key)
+            if cached: return cached
             company_data = run_company_actor(url)
             if company_data:
                 if company_data.get("headline"):
@@ -94,7 +143,11 @@ async def icp_score(data: IcpScore):
                     parts = [v for v in (hq.get("city"), hq.get("state"), hq.get("country")) if v]
                     if parts:
                         profile_dict["current_company_headquarters"] = ", ".join(parts)
-        return calculate_icp(profile_dict)
+        result = calculate_icp(profile_dict)
+        if url:
+            _cache_set(_icp_cache, url.rstrip("/"), result)
+            _save_cache()
+        return result
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))

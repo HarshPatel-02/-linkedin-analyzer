@@ -1,5 +1,14 @@
 // const API_BASE_URL = "http://127.0.0.1:8000";
 const API_BASE_URL = "https://linkedin-analyzer-90ne.onrender.com";
+
+const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+async function cacheGet(key) {
+  const r = await chrome.storage.local.get(key);
+  if (!r[key]) return null;
+  if (Date.now() - r[key].ts > CACHE_TTL) { chrome.storage.local.remove(key); return null; }
+  return r[key].data;
+}
+async function cacheSet(key, val) { await chrome.storage.local.set({ [key]: { data: val, ts: Date.now() } }); }
 // ─── Styles ───────────────────────────────────────────────────────────────────
 function injectStyles() {
   if (document.getElementById("li-ai-styles")) return;
@@ -72,9 +81,16 @@ function findActionTarget() {
 }
 
 function escHtml(str) {
-  const d = document.createElement("div");
-  d.textContent = str;
-  return d.innerHTML;
+  return String(str ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function safeUrl(u) {
+  try {
+    const url = new URL(u, location.href);
+    return /^https?:$/.test(url.protocol) ? url.href : "#";
+  } catch { return "#"; }
 }
 
 // ─── Buttons ──────────────────────────────────────────────────────────────────
@@ -145,6 +161,10 @@ async function handleAnalyzeClick() {
 
   try {
     const profile_url = window.location.href.split("?")[0];
+    const cacheKey    = "act_" + profile_url;
+
+    const cached = await cacheGet(cacheKey);
+    if (cached) { renderPanel(cached); return; }
 
     setStatus("Fetching data..");
 
@@ -162,6 +182,7 @@ async function handleAnalyzeClick() {
     setStatus("Computing score...");
 
     const apiData = await resp.json();
+    await cacheSet(cacheKey, apiData);
 
     renderPanel(apiData);
 
@@ -169,7 +190,7 @@ async function handleAnalyzeClick() {
     console.error("[LI-AI] ❌", err);
     document.getElementById("li-ai-body").innerHTML = `
       <div style="color:#dc2626;padding:16px;">
-        ❌ <strong>${err.message}</strong><br><br>
+        ❌ <strong>${escHtml(err.message)}</strong><br><br>
         Make sure the server is running:<br>
         <code style="font-size:12px;color:#9ca3af;">uvicorn main:app --reload</code>
       </div>`;
@@ -205,13 +226,19 @@ async function ICPButton() {
 
   try {
     const profile_url = window.location.href.split("?")[0];
-    const resp = await fetch(`${API_BASE_URL}/icp-score`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_url }),
-    });
-    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
-    const result = await resp.json();
+    const cacheKey    = "icp_" + profile_url;
+
+    let result = await cacheGet(cacheKey);
+    if (!result) {
+      const resp = await fetch(`${API_BASE_URL}/icp-score`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_url }),
+      });
+      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+      result = await resp.json();
+      await cacheSet(cacheKey, result);
+    }
 
     const bd = result.breakdown;
     const rows = Object.entries(bd).map(([label, data]) => {
@@ -220,13 +247,13 @@ async function ICPButton() {
       return `
         <div style="margin-bottom:10px;">
           <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600;color:#374151;margin-bottom:2px;">
-            <span>${label}</span>
+            <span>${escHtml(label)}</span>
             <span style="color:${color};">${data.score}/${data.max}</span>
           </div>
           <div style="height:5px;background:#e5e7eb;border-radius:999px;overflow:hidden;">
             <div style="height:100%;width:${pct}%;background:${color};border-radius:999px;"></div>
           </div>
-          <div style="font-size:11px;color:#9ca3af;margin-top:2px;">${data.reason}</div>
+          <div style="font-size:11px;color:#9ca3af;margin-top:2px;">${escHtml(data.reason)}</div>
         </div>`;
     }).join("");
 
@@ -243,7 +270,7 @@ async function ICPButton() {
       </div>`;
   } catch (err) {
     document.getElementById("li-icp-body").innerHTML = `
-      <div style="color:#dc2626;padding:16px;">❌ ${err.message}</div>`;
+      <div style="color:#dc2626;padding:16px;">❌ ${escHtml(err.message)}</div>`;
   }
 }
 
@@ -299,7 +326,7 @@ function renderPanel(data) {
   // Activity HTML
   let activityHTML = escHtml(activity);
   if (activity_url) {
-    activityHTML = `<a href="${escHtml(activity_url)}" target="_blank" style="color:#0a66c2;text-decoration:none;font-weight:600;">${escHtml(activity)} 🔗</a>`;
+    activityHTML = `<a href="${escHtml(safeUrl(activity_url))}" target="_blank" style="color:#0a66c2;text-decoration:none;font-weight:600;">${escHtml(activity)} 🔗</a>`;
   } else if (activity.includes("ago") || activity.toLowerCase().includes("today") || activity.toLowerCase().includes("yesterday")) {
     activityHTML = `<strong style="color:#16a34a;">⏱️ ${escHtml(activity)}</strong>`;
   } else if (activity.toLowerCase().includes("recent")) {
@@ -308,8 +335,8 @@ function renderPanel(data) {
 
   // Score breakdown rows
   const scoreRows = [
-    { label: "Recent Activity",    score: score_activity,     max: 30, detail: (activity.includes("ago") || activity.includes("today") || activity.includes("yesterday")) ? activity.split(" —")[0].trim() : "" },
-    { label: "Posting Frequency",  score: score_posts,        max: 20, detail: posts_90_days > 0 ? `${posts_90_days} posts in 90 days` : "0 posts found" },
+    { label: "Recent Activity",    score: score_activity,     max: 35, detail: (activity.includes("ago") || activity.includes("today") || activity.includes("yesterday")) ? activity.split(" —")[0].trim() : "" },
+    { label: "Posting Frequency",  score: score_posts,        max: 25, detail: posts_90_days > 0 ? `${posts_90_days} posts in 90 days` : "0 posts found" },
     { label: "Engagement Level",   score: score_engagement,   max: 20, detail: engagement_label },
     { label: "Profile Completeness", score: score_completeness, max: 10, detail: "" },
     { label: "Hiring/Growth Signals", score: score_signals,   max: 10, detail: "" },

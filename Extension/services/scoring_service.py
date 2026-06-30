@@ -53,8 +53,8 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
                 if d is not None and (most_recent_days is None or d < most_recent_days):
                     most_recent_days = d
     if most_recent_days is not None:
-        if most_recent_days <= 7:    score_activity = 30
-        elif most_recent_days <= 30: score_activity = 20
+        if most_recent_days <= 7:    score_activity = 35
+        elif most_recent_days <= 30: score_activity = 25
         elif most_recent_days <= 90: score_activity = 10
         else:                        score_activity = 0
     else:
@@ -75,7 +75,7 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
 
     if posts_90_days == 0 and posts_with_no_date > 0:
         posts_90_days = posts_with_no_date
-    if posts_90_days >= 10:   score_posts = 20
+    if posts_90_days >= 10:   score_posts = 25
     elif posts_90_days >= 5:  score_posts = 15
     elif posts_90_days >= 1:  score_posts = 10
     else:                     score_posts = 0

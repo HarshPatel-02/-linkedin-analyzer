@@ -29,24 +29,42 @@ TIER_3_TITLES = [
 ]
 
 EXACT_COMPANY_SIZE_KEYWORDS = [
-    "self-employed", "self employed", "freelance", "1-10", "2-10", "2 to 10",
+    "2-10",
 ]
 
 NEARBY_COMPANY_SIZE_KEYWORDS = [
-    "11-50", "11 to 50",
-    "51-200", "51 to 200",
-    "201-500", "201 to 500",
-    "501-1000", "501 to 1000",
-    "1001-5000", "1001 to 5000",
+    "11-50",
+    "51-200",
 ]
 
 PRIMARY_GEOGRAPHIES = [
-    "usa", "united states", "united states of america",
-    "aus", "australia", "uae", "united arab emirates",
+    "united states", "united states of america", "usa", "u.s.a", "u.s",
+    "australia",
+    "united arab emirates", "uae",
+]
+
+PRIMARY_CITY_KEYWORDS = [
+    # USA metros
+    "bay area", "san francisco", "new york", "los angeles", "chicago",
+    "seattle", "boston", "dallas", "atlanta", "denver", "philadelphia",
+    "houston", "austin", "miami", "silicon valley", "washington dc",
+    # Australia cities
+    "sydney", "melbourne", "brisbane", "perth", "adelaide",
+    # UAE cities
+    "dubai", "abu dhabi", "sharjah",
 ]
 
 SECONDARY_GEOGRAPHIES = [
-    "uk", "united kingdom", "india","in"
+    "united kingdom",
+    "india",
+]
+
+SECONDARY_CITY_KEYWORDS = [
+    # UK cities
+    "london", "manchester", "birmingham", "glasgow", "edinburgh",
+    # India cities
+    "bangalore", "bengaluru", "mumbai", "delhi", "hyderabad",
+    "chennai", "pune", "kolkata", "ahmedabad",
 ]
 
 ALL_ICP_KEYWORDS =["AI platform", "Digital health platform", "Virtual clinic", "Telehealth platform", "Health platform", "Care coordination", "Patient engagement", "Remote monitoring", "Practice management", "Healthcare SaaS", "AI documentation", "Clinical workflow"]
@@ -98,19 +116,26 @@ def score_company_size(text: str) -> tuple:
 def score_geography(country: str) -> tuple:
     if not country or country == "Not specified":
         return 0, "No data"
-    country_lower = country.lower()
-    # Split by common delimiters to check each segment
-    parts = [p.strip() for p in country_lower.replace("–", ",").replace("-", ",").replace("/", ",").split(",")]
-    if not parts:
-        parts = [country_lower]
+    segments = [s.strip().lower() for s in country.split(",")]
+    candidates = [segments[-1], segments[0]] if len(segments) > 1 else [segments[0]]
+    full = country.lower()
+
     for g in PRIMARY_GEOGRAPHIES:
-        for p in parts:
-            if g in p or p in g:
+        for c in candidates:
+            if g == c or g in c:
                 return 10, f"Primary ({country})"
+    for g in PRIMARY_CITY_KEYWORDS:
+        if g in full:
+            return 10, f"Primary ({country})"
+
     for g in SECONDARY_GEOGRAPHIES:
-        for p in parts:
-            if g in p or p in g:
+        for c in candidates:
+            if g == c or g in c:
                 return 5, f"Secondary ({country})"
+    for g in SECONDARY_CITY_KEYWORDS:
+        if g in full:
+            return 5, f"Secondary ({country})"
+
     return 0, "Other"
 
 def score_keywords(text: str) -> tuple:
@@ -120,7 +145,7 @@ def score_keywords(text: str) -> tuple:
     matches = 0
     matched = []
     for kw in ALL_ICP_KEYWORDS:
-        if kw in text_lower:
+        if kw.lower() in text_lower:
             matches += 1
             if kw not in matched:
                 matched.append(kw)
@@ -133,19 +158,14 @@ def score_keywords(text: str) -> tuple:
     return 0, "Other"
 
 def _emp_to_range(emp_count) -> str:
-    """Convert employee count number to range string for keyword matching."""
     try:
-        n = int(emp_count)
+        n = int(emp_count)           # it's a number → map to range
+        if n <= 10:  return "2-10"
+        if n <= 50:  return "11-50"
+        if n <= 200: return "51-200"
+        return "Other Range"
     except (ValueError, TypeError):
-        return str(emp_count) if emp_count else ""
-    if n == 1: return "self-employed"
-    if n <= 10: return "1-10"
-    if n <= 50: return "11-50"
-    if n <= 200: return "51-200"
-    if n <= 500: return "201-500"
-    if n <= 1000: return "501-1000"
-    if n <= 5000: return "1001-5000"
-    return "5000+"
+        return str(emp_count) if emp_count else ""  # already a range string → use as-is
 
 def calculate_icp(profile: dict) -> dict:
     position  = profile.get("position", "")
@@ -189,10 +209,11 @@ def run_company_actor(profile_url: str) -> dict:
             "isEmailRequired": False,
         })
         for item in client.dataset(run.default_dataset_id).iterate_items():
-            # Map actor field names → standardized keys
-            emp_count = item.get("current_company_employee_count")
-            if emp_count is not None:
-                emp_count = int(emp_count)
+            raw = item.get("current_company_employee_count") or item.get("employeeCount") or ""
+            try:
+                emp_count = int(raw)           # actor returned a number → convert
+            except (ValueError, TypeError):
+                emp_count = str(raw) if raw else ""  # already a range string like "11-50"
             return {
                 "headline": item.get("headline", ""),
                 "about": item.get("about", ""),
