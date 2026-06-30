@@ -16,7 +16,8 @@ RELATED_INDUSTRIES = [
 ]
 
 TIER_1_TITLES = [
-    "founder", "co-founder", "ceo", "owner",
+    "founder", "co-founder", "co founder", "cofounder",
+    "ceo", "owner",     
 ]
 
 TIER_2_TITLES = [
@@ -40,11 +41,12 @@ NEARBY_COMPANY_SIZE_KEYWORDS = [
 ]
 
 PRIMARY_GEOGRAPHIES = [
-    "usa", "united states", "aus", "australia", "uae",
+    "usa", "united states", "united states of america",
+    "aus", "australia", "uae", "united arab emirates",
 ]
 
 SECONDARY_GEOGRAPHIES = [
-    "uk", "united kingdom", "india",
+    "uk", "united kingdom", "india","in"
 ]
 
 ALL_ICP_KEYWORDS =["AI platform", "Digital health platform", "Virtual clinic", "Telehealth platform", "Health platform", "Care coordination", "Patient engagement", "Remote monitoring", "Practice management", "Healthcare SaaS", "AI documentation", "Clinical workflow"]
@@ -97,12 +99,18 @@ def score_geography(country: str) -> tuple:
     if not country or country == "Not specified":
         return 0, "No data"
     country_lower = country.lower()
+    # Split by common delimiters to check each segment
+    parts = [p.strip() for p in country_lower.replace("–", ",").replace("-", ",").replace("/", ",").split(",")]
+    if not parts:
+        parts = [country_lower]
     for g in PRIMARY_GEOGRAPHIES:
-        if g in country_lower or country_lower in g:
-            return 10, f"Primary ({country})"
+        for p in parts:
+            if g in p or p in g:
+                return 10, f"Primary ({country})"
     for g in SECONDARY_GEOGRAPHIES:
-        if g in country_lower or country_lower in g:
-            return 5, f"Secondary ({country})"
+        for p in parts:
+            if g in p or p in g:
+                return 5, f"Secondary ({country})"
     return 0, "Other"
 
 def score_keywords(text: str) -> tuple:

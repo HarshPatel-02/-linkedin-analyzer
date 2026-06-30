@@ -28,8 +28,6 @@ async def analyze(data: AnalyzeRequest):
             apify_data, posts_data = await asyncio.gather(apify_task, posts_task)
             if not apify_data.get("name") and not apify_data.get("first_name"):
                 raise Exception("Profile could not be scraped \u2014 LinkedIn may have blocked it")
-            if data.mutual_connections:
-                apify_data["mutual_connections"] = data.mutual_connections
             profile = map_apify_to_profile(apify_data, data.profile_url, posts_data)
         else:
             allowed = set(ProfileData.model_fields.keys())
@@ -81,7 +79,7 @@ async def icp_score(data: IcpScore):
                 if company_data.get("location"):
                     loc = company_data["location"]
                     if isinstance(loc, dict):
-                        profile_dict["country"] = loc.get("full") or loc.get("country") or ""
+                        profile_dict["country"] = loc.get("country") or loc.get("full") or ""
                     else:
                         profile_dict["country"] = loc
                 if company_data.get("current_company_name"):

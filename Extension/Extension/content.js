@@ -1,265 +1,5 @@
 // const API_BASE_URL = "http://127.0.0.1:8000";
 const API_BASE_URL = "https://linkedin-analyzer-90ne.onrender.com";
-// ─── LinkedIn Profile Scraper ──────────────────────────────────────────────────
-
-function scrapeProfile() {
-  const result = {
-    avatar: "", name: "", position: "", country: "",
-    about: "", current_company: "", education: "",
-    skills: "", projects: "", activity: "",
-    mutual_connections: 0,
-    profileUrl: window.location.href.split("?")[0]
-  };
-
-  // Mutual connections — LinkedIn renders as: "Name, Name and X other mutual connections"
-  (function scrapeMutuals() {
-    const parseNum = (str) => parseInt((str || "").replace(/,/g, ""), 10);
-
-    // ── Strategy 1: match LinkedIn's exact format ─────────────────────────────
-    // e.g. "Aayushi, Poonam and 8 other mutual connections"  → total = named + X
-    // e.g. "Aayushi and 1 other mutual connection"
-    // e.g. "Aayushi and Poonam are mutual connections"        → count named names
-    // e.g. "5 mutual connections"                             → plain number
-    const allEls = document.querySelectorAll("button, a, span, div, p, li");
-    for (const el of allEls) {
-      const txt = (el.innerText || el.textContent || "").trim();
-      if (!txt || txt.length > 200) continue;
-      if (!/mutual/i.test(txt)) continue;
-
-      // "Aayushi, Poonam and 8 other mutual connections"
-      const mOther = txt.match(/and\s+([\d,]+)\s+other\s+mutual/i);
-      if (mOther) {
-        // Count named people before "and X other": split on ", " and "and X other"
-        const namedPart = txt.split(/\s+and\s+[\d,]+\s+other/i)[0] || "";
-        const namedCount = namedPart.split(",").filter(s => s.trim().length > 0).length;
-        result.mutual_connections = namedCount + parseNum(mOther[1]);
-        return;
-      }
-
-      // "Aayushi and Poonam are mutual connections" — only named, no number
-      const mAre = txt.match(/^(.+?)\s+are\s+mutual\s+connection/i);
-      if (mAre) {
-        const names = mAre[1].split(/,|\band\b/).filter(s => s.trim().length > 0);
-        result.mutual_connections = names.length;
-        return;
-      }
-
-      // "RAJVI is a mutual connection" — single named person, no number
-      const mIs = txt.match(/^(.+?)\s+is\s+a\s+mutual\s+connection/i);
-      if (mIs) {
-        result.mutual_connections = 1;
-        return;
-      }
-
-      // "5 mutual connections" — plain number
-      const mPlain = txt.match(/^([\d,]+)\s+mutual/i);
-      if (mPlain) {
-        result.mutual_connections = parseNum(mPlain[1]);
-        return;
-      }
-    }
-
-    // ── Strategy 2: raw HTML scan ─────────────────────────────────────────────
-    const html = document.documentElement.outerHTML;
-    const m = html.match(/and\s+([\d,]+)\s+other\s+mutual/i)
-           || html.match(/"mutualConnectionsCount"\s*:\s*(\d+)/i)
-           || html.match(/"mutualConnection"\s*:\s*(\d+)/i)
-           || html.match(/"mutualCount"\s*:\s*(\d+)/i)
-           || html.match(/(\d+)\s+mutual\s+connection/i)
-           || html.match(/>(\d+)\s+mutual/i)
-           || html.match(/\bis\s+a\s+mutual\s+connection\b/i);
-    if (m) {
-      result.mutual_connections = parseNum(m[1]);
-      // "is a mutual connection" pattern has no number — count is 1
-      if (isNaN(result.mutual_connections) && /is a mutual connection/i.test(m[0])) {
-        result.mutual_connections = 1;
-      }
-      return;
-    }
-
-    // ── Strategy 3: body innerText scan (resilient to text changes) ──────────
-    const bodyText = document.body.innerText;
-    // Find all lines containing "mutual" in the body text
-    for (const line of bodyText.split("\n")) {
-      if (!/mutual/i.test(line)) continue;
-      // Try all patterns on this line
-      let match;
-      // "and 8 other mutual connections" → number
-      if (match = line.match(/and\s+([\d,]+)\s+other\s+mutual/i)) {
-        const namedPart = line.split(/\s+and\s+[\d,]+\s+other/i)[0] || "";
-        const namedCount = namedPart.split(",").filter(s => s.trim().length > 0).length;
-        result.mutual_connections = namedCount + parseNum(match[1]);
-        return;
-      }
-      // "5 mutual connections" → number
-      if (match = line.match(/(\d+)\s+mutual\s+connection/i)) {
-        result.mutual_connections = parseNum(match[1]);
-        return;
-      }
-      // "X and Y are mutual connections" → count names
-      if (match = line.match(/^(.+?)\s+are\s+mutual\s+connection/i)) {
-        const names = match[1].split(/,|\band\b/).filter(s => s.trim().length > 0);
-        result.mutual_connections = names.length;
-        return;
-      }
-      // "X is a mutual connection" → 1
-      if (match = line.match(/\bis\s+a\s+mutual\s+connection\b/i)) {
-        result.mutual_connections = 1;
-        return;
-      }
-      // Fallback: any line mentioning "mutual connection" → assume at least 1
-      if (/\bmutual\s+connection\b/i.test(line)) {
-        result.mutual_connections = 1;
-        return;
-      }
-    }
-  })();
-
-  // Avatar — pick the largest profile-displayphoto (owner's photo, not a mutual connection's thumbnail)
-  let bestAvatar = "", bestSize = 0;
-  for (const img of document.querySelectorAll("img")) {
-    if (!(img.src || "").includes("profile-displayphoto")) continue;
-    const size = (img.naturalWidth || img.width || 0) * (img.naturalHeight || img.height || 0);
-    if (size > bestSize) { bestSize = size; bestAvatar = img.src; }
-  }
-  // Fallback: if sizes are all 0 (not yet loaded), take the first one inside the top profile section
-  if (!bestAvatar) {
-    const topImg = document.querySelector("main section img[src*='profile-displayphoto']");
-    bestAvatar = topImg ? topImg.src : "";
-  }
-  result.avatar = bestAvatar;
-
-  const nameEl = document.querySelector("h1");
-  if (nameEl) {
-    result.name = (nameEl.innerText || nameEl.textContent || "").trim()
-      .replace(/\s*\([^)]*\)\s*$/g, "").trim() || "Unknown";
-  }
-
-  const headlineEl = document.querySelector('[class*="text-body-medium"]') ||
-                     document.querySelector('[class*="headline"]') ||
-                     document.querySelector('[class*="break-words"]') ||
-                     document.querySelector('[class*="inline-show-more"]') ||
-                     document.querySelector("main h2");
-  if (headlineEl) {
-    const txt = (headlineEl.innerText || "").trim();
-    const blocked = /notification|connection|follower|about|activity|message|invitation/i;
-    if (txt.length > 2 && txt.length < 200 && !blocked.test(txt))
-      result.position = txt;
-  }
-  // Fallback: extract from page title "Name — Position | LinkedIn"
-  if (!result.position) {
-    const titleMatch = document.title.match(/—\s*(.+?)\s*\|/);
-    if (titleMatch) result.position = titleMatch[1].trim();
-  }
-
-  const allSections = [...document.querySelectorAll("section")].filter(s => !s.closest("#li-ai-panel"));
-
-  const profileCardSection = allSections.find((s, i) => {
-    const h2text = (s.querySelector("h2")?.innerText || "").trim();
-    const isUI = /activity|about|featured|people|might|experience|education|skill|recommendation/i.test(h2text);
-    return h2text.length > 2 && !isUI && i >= 1;
-  });
-  if (profileCardSection) {
-    const cardLines = (profileCardSection.innerText || "").split("\n").map(l => l.trim()).filter(l => l.length > 1);
-    for (const line of cardLines) {
-      if (line.length > 3 && line.length < 80 &&
-          (line.includes(",") || /(india|usa|uk|canada|australia|germany|singapore|remote|area)/i.test(line))) {
-        result.country = line; break;
-      }
-    }
-  }
-
-  const aboutSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "About");
-  if (aboutSection) {
-    const clone = aboutSection.cloneNode(true);
-    clone.querySelectorAll("h2, button, svg, #li-ai-panel").forEach(el => el.remove());
-    result.about = (clone.innerText || "").replace(/^About\s*/i, "").replace(/\s{3,}/g, " ").trim() || "Not specified";
-  }
-
-  const expSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Experience");
-  if (expSection) {
-    const liItems = expSection.querySelectorAll("li");
-    if (liItems.length > 0) {
-      const clone = liItems[0].cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const expText = (clone.innerText || "").split("\n").map(l => l.trim()).filter(l => l)[0] || "";
-      result.current_company = expText.includes(" at ")
-        ? expText.split(" at ").slice(-1)[0].trim()
-        : expText;
-    }
-  }
-  if (!result.current_company) result.current_company = "Not specified";
-
-  const eduSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Education");
-  if (eduSection) {
-    const eduList = [];
-    for (const li of eduSection.querySelectorAll("li")) {
-      const clone = li.cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const txt = (clone.innerText || "").split("\n")[0]?.trim() || "";
-      if (txt.length > 2) eduList.push(txt);
-    }
-    result.education = eduList.join(" | ") || "Not specified";
-  }
-  if (!result.education) result.education = "Not specified";
-
-  const skillSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Skills");
-  if (skillSection) {
-    const skillList = [];
-    for (const li of skillSection.querySelectorAll("li")) {
-      const clone = li.cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const txt = (clone.innerText || "").split("\n")[0]?.trim() || "";
-      if (txt.length > 1 && txt.length < 100) skillList.push(txt);
-    }
-    result.skills = skillList.slice(0, 15).join(" • ") || "Not specified";
-  }
-  if (!result.skills) result.skills = "Not specified";
-
-  const projSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Projects");
-  if (projSection) {
-    const projList = [];
-    for (const li of projSection.querySelectorAll("li")) {
-      const clone = li.cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const txt = (clone.innerText || "").split("\n")[0]?.trim() || "";
-      if (txt.length > 2) projList.push(txt);
-    }
-    result.projects = projList.join(" | ") || "No projects";
-  }
-  if (!result.projects) result.projects = "No projects";
-
-  const actSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Activity");
-  if (actSection) {
-    const fullText = actSection.innerText || "";
-    const patterns = [
-      /Posted\s+(\d+\s*(?:second|minute|hour|day|week|month|year)s?\s*ago)/i,
-      /(\d+\s*(?:second|minute|hour|day|week|month|year)s?\s*ago)/i,
-    ];
-    for (const pattern of patterns) {
-      const match = fullText.match(pattern);
-      if (match) { result.activity = match[1] || match[0]; break; }
-    }
-    if (!result.activity) {
-      result.activity = fullText.toLowerCase().includes("posted") ? "Posted recently"
-        : fullText.length > 200 ? "Has recent activity"
-        : "No recent activity";
-    }
-  }
-  if (!result.activity) result.activity = "No activity data";
-
-  return result;
-}
-
-// ─── Message Listener ─────────────────────────────────────────────────────────
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "getProfile") {
-    try { sendResponse({ success: true, data: scrapeProfile() }); }
-    catch (e) { sendResponse({ success: false, error: e.message }); }
-  }
-  return true;
-});
-
 // ─── Styles ───────────────────────────────────────────────────────────────────
 function injectStyles() {
   if (document.getElementById("li-ai-styles")) return;
@@ -338,7 +78,7 @@ function escHtml(str) {
 }
 
 // ─── Buttons ──────────────────────────────────────────────────────────────────
-function addAIButton() {
+function activityButton() {
   if (!isProfilePage()) return;
   if (document.getElementById("li-ai-analyze-btn") && document.getElementById("li-icp-btn")) return;
   const anchor = findActionTarget();
@@ -349,7 +89,7 @@ function addAIButton() {
     const btn = document.createElement("button");
     btn.id = "li-ai-analyze-btn";
     btn.type = "button";
-    btn.textContent = "Activity Score";
+    btn.textContent = "Activity";
     anchor.insertAdjacentElement("afterend", btn);
     btn.addEventListener("click", handleAnalyzeClick);
   }
@@ -358,10 +98,10 @@ function addAIButton() {
     const icpBtn = document.createElement("button");
     icpBtn.id = "li-icp-btn";
     icpBtn.type = "button";
-    icpBtn.textContent = "ICP Score";
+    icpBtn.textContent = "ICP";
     const actBtn = document.getElementById("li-ai-analyze-btn");
     (actBtn || anchor).insertAdjacentElement("afterend", icpBtn);
-    icpBtn.addEventListener("click", handleIcpClick);
+    icpBtn.addEventListener("click", ICPButton);
   }
 }
 
@@ -375,7 +115,7 @@ async function handleAnalyzeClick() {
   panel.id = "li-ai-panel";
   panel.innerHTML = `
     <div class="panel-header">
-      <span>⚡ Activity Score</span>
+      <span>⚡ Activity</span>
       <button class="panel-close" id="li-ai-close">×</button>
     </div>
     <div class="panel-body" id="li-ai-body">
@@ -405,24 +145,13 @@ async function handleAnalyzeClick() {
 
   try {
     const profile_url = window.location.href.split("?")[0];
-    let pageData = scrapeProfile();
-
-    // Retry mutual connections once if 0 (LinkedIn lazy-loads this section)
-    if (!pageData.mutual_connections) {
-      await new Promise(r => setTimeout(r, 1500));
-      pageData = scrapeProfile();
-    }
 
     setStatus("Fetching data..");
-  
 
     const resp = await fetch(`${API_BASE_URL}/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        profile_url,
-        mutual_connections: pageData.mutual_connections || 0,
-      }),
+      body: JSON.stringify({ profile_url }),
     });
 
     if (!resp.ok) {
@@ -430,28 +159,11 @@ async function handleAnalyzeClick() {
       throw new Error(errBody.detail || `Server error ${resp.status}`);
     }
 
-    setStep("step-profile", "Actor 1: Profile scraper", true);
-    setStep("step-posts",   "Actor 2: Posts scraper", true);
     setStatus("Computing score...");
-    setStep("step-score", "Computing Outreach Readiness Score", true);
 
     const apiData = await resp.json();
 
-    // Merge: page data (logged-in view) + API data (Apify)
-    const merged = {
-      ...apiData,
-      name:              pageData.name                                                            || apiData.name,
-      country:           pageData.country && pageData.country !== "Not specified"                  ? pageData.country : apiData.country,
-      about:             pageData.about && pageData.about !== "Not specified"                      ? pageData.about : apiData.about,
-      current_company:   pageData.current_company && pageData.current_company !== "Not specified"  ? pageData.current_company : apiData.current_company,
-      position:          pageData.position && pageData.position !== "Not specified"                ? pageData.position : apiData.position,
-      education:         pageData.education && pageData.education !== "Not specified"              ? pageData.education : apiData.education,
-      skills:            pageData.skills && pageData.skills !== "Not specified"                    ? pageData.skills : apiData.skills,
-      projects:          pageData.projects && pageData.projects !== "Not specified"                ? pageData.projects : apiData.projects,
-      mutual_connections: pageData.mutual_connections > 0 ? pageData.mutual_connections : apiData.mutual_connections,
-    };
-
-    renderPanel(merged);
+    renderPanel(apiData);
 
   } catch (err) {
     console.error("[LI-AI] ❌", err);
@@ -465,7 +177,7 @@ async function handleAnalyzeClick() {
 }
 
 // ─── ICP Score Click Handler ──────────────────────────────────────────────────
-async function handleIcpClick() {
+async function ICPButton() {
   const existing = document.getElementById("li-icp-panel");
   if (existing) { existing.remove(); return; }
 
@@ -492,11 +204,11 @@ async function handleIcpClick() {
   document.getElementById("li-icp-close").onclick = () => panel.remove();
 
   try {
-    const pageData = scrapeProfile();
+    const profile_url = window.location.href.split("?")[0];
     const resp = await fetch(`${API_BASE_URL}/icp-score`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(pageData),
+      body: JSON.stringify({ profile_url }),
     });
     if (!resp.ok) throw new Error(`Server error ${resp.status}`);
     const result = await resp.json();
@@ -524,7 +236,7 @@ async function handleIcpClick() {
           <div style="font-size:36px;font-weight:800;color:${result.icp_score >= 70 ? "#059669" : result.icp_score >= 40 ? "#f59e0b" : "#dc2626"};">${result.icp_score}</div>
           <div>
             <div style="font-size:11px;color:#9ca3af;">out of 100</div>
-            <div style="font-size:14px;font-weight:700;color:#374151;">ICP Score</div>
+            <div style="font-size:14px;font-weight:700;color:#374151;">ICP</div>
           </div>
         </div>
         ${rows}
@@ -596,12 +308,11 @@ function renderPanel(data) {
 
   // Score breakdown rows
   const scoreRows = [
-    { label: "Recent Activity",    score: score_activity,     max: 30, detail: "" },
+    { label: "Recent Activity",    score: score_activity,     max: 30, detail: (activity.includes("ago") || activity.includes("today") || activity.includes("yesterday")) ? activity.split(" —")[0].trim() : "" },
     { label: "Posting Frequency",  score: score_posts,        max: 20, detail: posts_90_days > 0 ? `${posts_90_days} posts in 90 days` : "0 posts found" },
     { label: "Engagement Level",   score: score_engagement,   max: 20, detail: engagement_label },
     { label: "Profile Completeness", score: score_completeness, max: 10, detail: "" },
     { label: "Hiring/Growth Signals", score: score_signals,   max: 10, detail: "" },
-    { label: "Mutual Connections", score: score_mutuals,      max: 10, detail: `${mutual_count} mutual` },
   ];
 
   const scoreRowsHTML = scoreRows.map(row => {
@@ -641,8 +352,8 @@ function renderPanel(data) {
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────
-setTimeout(addAIButton, 1500);
-setInterval(addAIButton, 3000);
+setTimeout(activityButton, 1500);
+setInterval(activityButton, 3000);
 
 let lastUrl = location.href;
 const observer = new MutationObserver(() => {
@@ -652,9 +363,9 @@ const observer = new MutationObserver(() => {
     document.getElementById("li-icp-btn")?.remove();
     document.getElementById("li-ai-panel")?.remove();
     document.getElementById("li-icp-panel")?.remove();
-    setTimeout(addAIButton, 1500);
+    setTimeout(activityButton, 1500);
   } else {
-    addAIButton();
+    activityButton();
   }
 });
 observer.observe(document.body, { childList: true, subtree: true });
