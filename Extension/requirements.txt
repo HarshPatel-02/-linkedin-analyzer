@@ -3,3 +3,4 @@ uvicorn
 apify-client
 python-dotenv
 pydantic
+anthropic

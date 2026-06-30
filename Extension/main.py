@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import traceback
 from dotenv import load_dotenv
-from models import AnalyzeRequest, IcpScore, ProfileData
+from models import AnalyzeRequest, IcpScore, ProfileData, ChatRequest
 from services.actor_service import run_apify_actor, run_posts_actor, map_apify_to_profile
 from services.icp_service import calculate_icp, run_company_actor
+from services import chat_service
 
 load_dotenv()
 
@@ -114,6 +115,24 @@ async def icp_score(data: IcpScore):
         if url:
             _icp_cache[url.rstrip("/")] = result
         return result
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+@app.post("/analyze-chat")
+async def analyze_chat_endpoint(data: ChatRequest):
+    try:
+        if not data.conversation_url:
+            raise HTTPException(400, "conversation_url is required")
+        result = await asyncio.to_thread(
+            chat_service.analyze_chat,
+            data.conversation_url,
+            data.profile_url,
+            data.messages or [],
+        )
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))

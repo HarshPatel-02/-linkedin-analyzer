@@ -48,6 +48,11 @@ class ProfileData(BaseModel):
     posts_90_days:      int   = 0
     engagement_label:   str   = ""
 
+class ChatRequest(BaseModel):
+    conversation_url: str  = ""
+    profile_url:      str  = ""
+    messages:         list = []
+
 class IcpScore(BaseModel):
     name:               str   = ""   
     country:            str   = ""
