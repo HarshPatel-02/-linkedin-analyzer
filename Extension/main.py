@@ -3,10 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import traceback
 from dotenv import load_dotenv
-from models import AnalyzeRequest, IcpScore, ProfileData, SuggestionsRequest
+from models import AnalyzeRequest, IcpScore, ProfileData, SuggestionsRequest, GrammarRequest
 from services.actor_service import run_apify_actor, run_posts_actor, map_apify_to_profile
 from services.icp_service import calculate_icp, run_company_actor
-from services.suggestion_service import generate_suggestions
+from services.suggestion_service import generate_suggestions, fix_grammar
 
 load_dotenv()
 
@@ -122,8 +122,19 @@ async def icp_score(data: IcpScore):
 @app.post("/generate-suggestions")
 async def generate_suggestions_endpoint(data: SuggestionsRequest):
     try:
-        suggestions = await asyncio.to_thread(generate_suggestions, data.messages, data.participant, data.profile)
+        suggestions = await asyncio.to_thread(
+            generate_suggestions, data.messages, data.participant, data.profile, data.tone, data.nonce
+        )
         return {"suggestions": suggestions}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+@app.post("/grammar-fix")
+async def grammar_fix_endpoint(data: GrammarRequest):
+    try:
+        fixed = await asyncio.to_thread(fix_grammar, data.text)
+        return {"text": fixed}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))
