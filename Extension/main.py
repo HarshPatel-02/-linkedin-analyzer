@@ -122,7 +122,7 @@ async def icp_score(data: IcpScore):
 @app.post("/generate-suggestions")
 async def generate_suggestions_endpoint(data: SuggestionsRequest):
     try:
-        suggestions = await asyncio.to_thread(generate_suggestions, data.messages, data.participant)
+        suggestions = await asyncio.to_thread(generate_suggestions, data.messages, data.participant, data.profile)
         return {"suggestions": suggestions}
     except Exception as e:
         traceback.print_exc()

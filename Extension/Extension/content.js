@@ -468,10 +468,11 @@ const API_CHAT_URL = "http://localhost:8000";
 // inline styles. DOM is used only for UI injection + writing the chosen reply.
 
 // Inline styles (external CSS can't cross the shadow boundary).
+// Icon-only button, styled to sit inline with LinkedIn's footer action icons.
 const SUGGEST_BTN_CSS =
-  "display:inline-flex;align-items:center;gap:6px;margin:6px 8px;padding:6px 14px;" +
-  "border:1.5px solid #0a66c2;border-radius:999px;background:#eef3fb;color:#0a66c2;" +
-  "font:600 13px/1 'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;";
+  "display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;" +
+  "margin:0 2px;padding:0;border:none;border-radius:50%;background:transparent;color:#0a66c2;" +
+  "font-size:16px;line-height:1;cursor:pointer;flex-shrink:0;";
 const SUGGEST_BOX_CSS =
   "margin:6px 8px 10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;" +
   "box-shadow:0 2px 12px rgba(0,0,0,.15);font-family:'Inter',-apple-system,'Segoe UI',sans-serif;";
@@ -546,6 +547,26 @@ function getParticipant(messages) {
   return other ? other.sender : "";
 }
 
+// Recipient's name + LinkedIn headline from the chat header (used to personalize
+// a FIRST message when there are no prior messages to reply to).
+function getRecipientProfile(editable) {
+  let el = editable, container = null;
+  for (let i = 0; el && i < 20; i++, el = el.parentElement) {
+    if (
+      el.querySelector &&
+      el.querySelector(".artdeco-entity-lockup__title, .msg-entity-lockup__entity-title") &&
+      el.querySelector(".artdeco-entity-lockup__subtitle, .msg-entity-lockup__entity-subtitle")
+    ) { container = el; break; } // nearest header block holding both name + headline
+  }
+  if (!container) return { name: "", headline: "" };
+  const t = container.querySelector(".artdeco-entity-lockup__title, .msg-entity-lockup__entity-title");
+  const s = container.querySelector(".artdeco-entity-lockup__subtitle, .msg-entity-lockup__entity-subtitle");
+  return {
+    name: t ? t.innerText.trim().split("\n")[0].trim() : "",
+    headline: s ? s.innerText.trim().replace(/\s+/g, " ") : "",
+  };
+}
+
 // Conversation id (best-effort; backend uses the scraped messages, not this).
 function getConversationId(editable) {
   const m = window.location.href.match(/\/messaging\/thread\/([^/?#]+)/);
@@ -559,67 +580,87 @@ function getConversationId(editable) {
 function injectSuggestButton() {
   ensureShadowObservers();
   for (const editable of findComposers()) {
-    const anchor =
-      (editable.closest && (editable.closest(".msg-form") || editable.closest("form") ||
-        editable.closest('[class*="msg-form"]'))) || editable.parentElement;
-    if (!anchor || !anchor.parentElement) continue;
-    if (anchor.previousElementSibling?.classList?.contains("li-suggest-wrap")) continue;
-
-    const wrap = document.createElement("div");
-    wrap.className = "li-suggest-wrap";
-    wrap.style.cssText = "width:100%;";
+    const form = (editable.closest && (editable.closest(".msg-form") || editable.closest("form"))) || null;
+    if (!form) continue;
+    // put the icon next to LinkedIn's footer icons (attach / GIF / emoji)
+    const actions = form.querySelector(".msg-form__left-actions") || form;
+    if (actions.querySelector(".li-suggest-btn")) continue; // already added to this composer
 
     const btn = document.createElement("button");
+    btn.className = "li-suggest-btn";
     btn.type = "button";
-    btn.textContent = "✨ AI Suggest";
+    btn.title = "AI Suggest reply";
+    btn.textContent = "✨";
     btn.style.cssText = SUGGEST_BTN_CSS;
-    btn.addEventListener("click", () => handleSuggestClick(editable, wrap, btn));
-
-    wrap.appendChild(btn);
-    anchor.insertAdjacentElement("beforebegin", wrap);
+    btn.addEventListener("mouseenter", () => { btn.style.background = "rgba(0,0,0,.08)"; });
+    btn.addEventListener("mouseleave", () => { btn.style.background = "transparent"; });
+    btn.addEventListener("click", () => handleSuggestClick(editable, form, btn));
+    actions.appendChild(btn);
   }
 }
 
-async function handleSuggestClick(editable, wrap, btn) {
-  const openBox = wrap.querySelector(".li-suggest-box");
-  if (openBox) { openBox.remove(); btn.textContent = "✨ AI Suggest"; return; }
+// The suggestions panel sits just above the compose form.
+function existingBox(form) {
+  const prev = form.previousElementSibling;
+  return prev && prev.classList && prev.classList.contains("li-suggest-box") ? prev : null;
+}
+function placeBox(form, box) {
+  existingBox(form)?.remove();
+  form.insertAdjacentElement("beforebegin", box);
+}
+
+async function handleSuggestClick(editable, form, btn) {
+  if (existingBox(form)) { existingBox(form).remove(); return; } // toggle closed
 
   btn.disabled = true;
-  btn.textContent = "✨ Thinking…";
+  const prev = btn.textContent;
+  btn.textContent = "…";
   try {
     const messages = scrapeConversation(editable);
-    const participant = getParticipant(messages);
+    const profile = getRecipientProfile(editable);
+    const participant = getParticipant(messages) || profile.name;
     const conversation_id = getConversationId(editable);
     const resp = await fetch(`${API_CHAT_URL}/generate-suggestions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation_id, participant, messages }),
+      body: JSON.stringify({ conversation_id, participant, messages, profile }),
     });
     if (!resp.ok) throw new Error(`Server error ${resp.status}`);
     const data = await resp.json();
-    renderSuggestions(data.suggestions || [], editable, wrap);
+    renderSuggestions(data.suggestions || [], editable, form);
   } catch (err) {
-    renderMessage(wrap, `❌ ${err.message} — is the backend running on :8000?`);
+    renderMessage(form, `❌ ${err.message} — is the backend running on :8000?`);
   } finally {
     btn.disabled = false;
-    btn.textContent = "✨ AI Suggest";
+    btn.textContent = prev;
   }
 }
 
-function renderMessage(wrap, text) {
-  wrap.querySelector(".li-suggest-box")?.remove();
+function renderMessage(form, text) {
   const box = document.createElement("div");
   box.className = "li-suggest-box";
   box.style.cssText = SUGGEST_BOX_CSS + "font-size:12px;color:#6b7280;";
   box.textContent = text;
-  wrap.appendChild(box);
+  placeBox(form, box);
 }
 
-function renderSuggestions(list, editable, wrap) {
-  wrap.querySelector(".li-suggest-box")?.remove();
+function renderSuggestions(list, editable, form) {
   const box = document.createElement("div");
   box.className = "li-suggest-box";
   box.style.cssText = SUGGEST_BOX_CSS;
+
+  // Close the panel and detach its listeners. Called by the × button and by Send.
+  const sendBtn = form.querySelector(".msg-form__send-button");
+  let onEnter;
+  const removeBox = () => {
+    box.remove();
+    if (sendBtn) sendBtn.removeEventListener("click", removeBox);
+    editable.removeEventListener("keydown", onEnter);
+  };
+  // Pressing Enter (without Shift) sends the message in LinkedIn → also close.
+  onEnter = (e) => { if (e.key === "Enter" && !e.shiftKey) setTimeout(removeBox, 30); };
+  if (sendBtn) sendBtn.addEventListener("click", removeBox);
+  editable.addEventListener("keydown", onEnter);
 
   const head = document.createElement("div");
   head.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
@@ -630,7 +671,7 @@ function renderSuggestions(list, editable, wrap) {
   close.type = "button";
   close.textContent = "×";
   close.style.cssText = "background:none;border:none;font-size:18px;line-height:1;cursor:pointer;color:#9ca3af;";
-  close.addEventListener("click", () => box.remove());
+  close.addEventListener("click", removeBox);
   head.appendChild(title);
   head.appendChild(close);
   box.appendChild(head);
@@ -642,18 +683,27 @@ function renderSuggestions(list, editable, wrap) {
     box.appendChild(empty);
   }
 
+  // Highlight the picked suggestion; keep the panel open so another can be chosen.
+  let selected = null;
+  const norm = (b) => { b.style.background = "#f9fafb"; b.style.borderColor = "#e5e7eb"; };
+  const sel = (b) => { b.style.background = "#dbeafe"; b.style.borderColor = "#0a66c2"; };
+
   list.forEach((text) => {
     const item = document.createElement("button");
     item.type = "button";
     item.textContent = text;
     item.style.cssText = SUGGEST_ITEM_CSS;
-    item.addEventListener("mouseenter", () => { item.style.borderColor = "#0a66c2"; item.style.background = "#eef3fb"; });
-    item.addEventListener("mouseleave", () => { item.style.borderColor = "#e5e7eb"; item.style.background = "#f9fafb"; });
-    item.addEventListener("click", () => { insertIntoComposer(editable, text); box.remove(); });
+    item.addEventListener("mouseenter", () => { if (item !== selected) { item.style.borderColor = "#0a66c2"; item.style.background = "#eef3fb"; } });
+    item.addEventListener("mouseleave", () => { item === selected ? sel(item) : norm(item); });
+    item.addEventListener("click", () => {
+      insertIntoComposer(editable, text);   // paste into the box
+      if (selected) norm(selected);
+      selected = item; sel(item);            // mark as chosen — panel stays open
+    });
     box.appendChild(item);
   });
 
-  wrap.appendChild(box);
+  placeBox(form, box);
 }
 
 // Write the chosen reply into LinkedIn's contenteditable composer (UI write only).
