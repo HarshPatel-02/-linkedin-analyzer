@@ -52,6 +52,7 @@ class SuggestionsRequest(BaseModel):
     conversation_id: str = ""
     participant: str = ""
     messages: list[dict] = []   # [{sender, text}] read in the user's own browser
+    profile: dict = {}          # {name, headline} of the recipient (for first messages)
 
 class SuggestionsResponse(BaseModel):
     suggestions: list[str] = []

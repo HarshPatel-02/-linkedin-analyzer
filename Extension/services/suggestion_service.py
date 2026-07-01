@@ -3,10 +3,12 @@ import time
 import requests
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-# For testing we call Claude Sonnet through OpenRouter (OpenAI-compatible API) so
-# an OpenRouter balance can be used instead of a direct Anthropic balance.
-# Set OPENROUTER_API_KEY in .env. Optionally override OPENROUTER_MODEL — e.g. a
-# free model like "meta-llama/llama-3.3-70b-instruct:free" for zero-cost testing.
+# Primary provider: Groq (fast + generous free tier). Set GROQ_API_KEY in .env.
+# Fallback provider: OpenRouter (OpenAI-compatible). Set OPENROUTER_API_KEY.
+# Whichever key is present is used; if both are set, Groq is tried first.
+GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
 OPENROUTER_URL   = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
 
@@ -25,39 +27,91 @@ FALLBACK_MODELS = [
 
 
 # ─── 1. Build the AI prompt ───────────────────────────────────────────────────
-def build_prompt(messages: list, participant: str = "") -> str:
-    who = participant or "the other person"
+def build_prompt(messages: list, participant: str = "", profile: dict = None) -> str:
+    profile = profile or {}
+    name = (profile.get("name") or participant or "").strip()
+    headline = (profile.get("headline") or "").strip()
+    who = name or "the other person"
 
-    if messages:
-        lines = []
-        for m in messages:
-            sender = (m.get("sender") or "Them").strip() if isinstance(m, dict) else "Them"
-            text = (m.get("text") or "").strip() if isinstance(m, dict) else str(m).strip()
-            if text:
-                lines.append(f"{sender}: {text}")
-        conversation = "\n".join(lines) or "(No prior messages — write a friendly professional opener.)"
+    lines = []
+    for m in (messages or []):
+        sender = (m.get("sender") or "Them").strip() if isinstance(m, dict) else "Them"
+        text = (m.get("text") or "").strip() if isinstance(m, dict) else str(m).strip()
+        if text:
+            lines.append(f"{sender}: {text}")
+
+    # who the recipient is (used most for a first message)
+    recipient = ""
+    if name:
+        recipient += f"Recipient: {name}\n"
+    if headline:
+        recipient += f"Their LinkedIn headline: {headline}\n"
+
+    if lines:
+        conversation = "\n".join(lines)
+        task = (
+            f"You are writing the reply. The most recent message is from {who}; reply to it, "
+            "using the earlier messages as context."
+        )
     else:
-        conversation = "(No prior messages — write a friendly professional opener.)"
+        # No prior messages → craft a personalized FIRST outreach message.
+        conversation = "(No prior messages — this is a first outreach message.)"
+        task = (
+            f"There is no prior conversation. Write a personalized FIRST message to {who} to start a "
+            "conversation. If a headline is given, reference what they do so it feels tailored, not generic."
+        )
 
     return (
         "You are a LinkedIn networking assistant.\n\n"
-        "Analyze this conversation.\n\n"
-        "Generate 3 possible replies.\n\n"
+        "Generate 3 possible messages.\n\n"
         "Rules:\n"
         "- Professional\n"
         "- Human sounding\n"
         "- Short\n"
         "- Context aware\n"
         "- Do not mention AI\n\n"
-        f"You are writing the reply. The most recent message is from {who}; reply to it.\n"
-        "Return ONLY the 3 replies, each on its own line, numbered 1., 2., 3. "
+        f"{recipient}"
+        f"{task}\n"
+        "Return ONLY the 3 messages, each on its own line, numbered 1., 2., 3. "
         "with no extra commentary.\n\n"
         f"Conversation:\n{conversation}"
     )
 
 
-# ─── 2. Call the LLM via OpenRouter ───────────────────────────────────────────
+# ─── 2. Call the LLM ──────────────────────────────────────────────────────────
 def _call_llm(prompt: str) -> str:
+    # Prefer Groq when its key is set (fast, generous free tier).
+    if os.getenv("GROQ_API_KEY"):
+        try:
+            return _call_groq(prompt)
+        except Exception as e:
+            print("[suggestions] groq failed, trying openrouter:", e)
+    return _call_openrouter(prompt)
+
+
+def _call_groq(prompt: str) -> str:
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise Exception("GROQ_API_KEY is not set")
+    resp = requests.post(
+        GROQ_URL,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={
+            "model": GROQ_MODEL,
+            "max_tokens": int(os.getenv("GROQ_MAX_TOKENS", "400")),
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    text = resp.json()["choices"][0]["message"]["content"]
+    if not (text and text.strip()):
+        raise Exception("Groq returned empty content")
+    print(f"[suggestions] provider: groq ({GROQ_MODEL})")
+    return text
+
+
+def _call_openrouter(prompt: str) -> str:
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
         raise Exception("OPENROUTER_API_KEY is not set in environment variables")
@@ -119,8 +173,8 @@ def _parse_suggestions(text: str) -> list:
 
 
 # ─── 4. Generate suggestions from browser-supplied conversation ───────────────
-def generate_suggestions(messages: list, participant: str = "") -> list:
-    prompt = build_prompt(messages or [], participant)
+def generate_suggestions(messages: list, participant: str = "", profile: dict = None) -> list:
+    prompt = build_prompt(messages or [], participant, profile)
 
     try:
         text = _call_llm(prompt)
