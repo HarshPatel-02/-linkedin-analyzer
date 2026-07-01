@@ -53,9 +53,14 @@ class SuggestionsRequest(BaseModel):
     participant: str = ""
     messages: list[dict] = []   # [{sender, text}] read in the user's own browser
     profile: dict = {}          # {name, headline} of the recipient (for first messages)
+    tone: str = ""              # Friendly / Formal / Short / Enthusiastic
+    nonce: str = ""             # bumped on Regenerate to force different results
 
 class SuggestionsResponse(BaseModel):
     suggestions: list[str] = []
+
+class GrammarRequest(BaseModel):
+    text: str = ""              # the user's own typed draft to clean up
 
 class IcpScore(BaseModel):
     name:               str   = ""   

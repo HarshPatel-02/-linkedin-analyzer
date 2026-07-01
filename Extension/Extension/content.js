@@ -479,6 +479,19 @@ const SUGGEST_BOX_CSS =
 const SUGGEST_ITEM_CSS =
   "display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;border:1px solid #e5e7eb;" +
   "border-radius:8px;background:#f9fafb;color:#111827;font:400 13px/1.45 'Inter',sans-serif;cursor:pointer;";
+const TONE_CSS =
+  "padding:3px 10px;border:1px solid #cbd5e1;border-radius:999px;background:#fff;color:#374151;" +
+  "font:600 11px/1 'Inter',sans-serif;cursor:pointer;";
+const COPY_CSS =
+  "position:absolute;top:6px;right:6px;width:24px;height:24px;padding:0;border:none;border-radius:6px;" +
+  "background:rgba(255,255,255,.85);cursor:pointer;font-size:13px;line-height:1;";
+
+// In-memory cache of suggestions per (conversation + tone). Cleared on page reload.
+const suggestCache = new Map();
+function convoSignature(editable, messages) {
+  const last = messages.length ? (messages[messages.length - 1].text || "") : "new";
+  return getConversationId(editable) + "|" + messages.length + "|" + last.slice(0, 40);
+}
 
 // Collect the document plus every OPEN shadow root, recursively.
 function collectRoots() {
@@ -577,133 +590,258 @@ function getConversationId(editable) {
   return "current_chat_id";
 }
 
+function hoverBg(btn) {
+  btn.addEventListener("mouseenter", () => { btn.style.background = "rgba(0,0,0,.08)"; });
+  btn.addEventListener("mouseleave", () => { btn.style.background = "transparent"; });
+}
+
 function injectSuggestButton() {
   ensureShadowObservers();
+  pruneOrphanPanels(); // close panels whose chat was closed/navigated away
   for (const editable of findComposers()) {
     const form = (editable.closest && (editable.closest(".msg-form") || editable.closest("form"))) || null;
     if (!form) continue;
-    // put the icon next to LinkedIn's footer icons (attach / GIF / emoji)
+    // put the icons next to LinkedIn's footer icons (attach / GIF / emoji)
     const actions = form.querySelector(".msg-form__left-actions") || form;
     if (actions.querySelector(".li-suggest-btn")) continue; // already added to this composer
 
+    // ✨ AI Suggest
     const btn = document.createElement("button");
     btn.className = "li-suggest-btn";
     btn.type = "button";
     btn.title = "AI Suggest reply";
     btn.textContent = "✨";
     btn.style.cssText = SUGGEST_BTN_CSS;
-    btn.addEventListener("mouseenter", () => { btn.style.background = "rgba(0,0,0,.08)"; });
-    btn.addEventListener("mouseleave", () => { btn.style.background = "transparent"; });
+    hoverBg(btn);
     btn.addEventListener("click", () => handleSuggestClick(editable, form, btn));
     actions.appendChild(btn);
+
+    // ✍️ Grammar fix (cleans up the user's own typed draft)
+    const gbtn = document.createElement("button");
+    gbtn.className = "li-grammar-btn";
+    gbtn.type = "button";
+    gbtn.title = "Fix grammar of your draft";
+    gbtn.textContent = "✍️";
+    gbtn.style.cssText = SUGGEST_BTN_CSS;
+    hoverBg(gbtn);
+    gbtn.addEventListener("click", () => handleGrammarFix(editable, gbtn));
+    actions.appendChild(gbtn);
   }
 }
 
-// The suggestions panel sits just above the compose form.
-function existingBox(form) {
-  const prev = form.previousElementSibling;
-  return prev && prev.classList && prev.classList.contains("li-suggest-box") ? prev : null;
-}
-function placeBox(form, box) {
-  existingBox(form)?.remove();
-  form.insertAdjacentElement("beforebegin", box);
-}
-
-async function handleSuggestClick(editable, form, btn) {
-  if (existingBox(form)) { existingBox(form).remove(); return; } // toggle closed
-
-  btn.disabled = true;
+// Clean up the user's own typed draft in place.
+async function handleGrammarFix(editable, btn) {
+  const text = (editable.innerText || "").trim();
   const prev = btn.textContent;
+  if (!text) { btn.textContent = "✍️?"; setTimeout(() => (btn.textContent = prev), 900); return; }
+  btn.disabled = true;
   btn.textContent = "…";
   try {
-    const messages = scrapeConversation(editable);
-    const profile = getRecipientProfile(editable);
-    const participant = getParticipant(messages) || profile.name;
-    const conversation_id = getConversationId(editable);
-    const resp = await fetch(`${API_CHAT_URL}/generate-suggestions`, {
+    const resp = await fetch(`${API_CHAT_URL}/grammar-fix`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation_id, participant, messages, profile }),
+      body: JSON.stringify({ text }),
     });
     if (!resp.ok) throw new Error(`Server error ${resp.status}`);
     const data = await resp.json();
-    renderSuggestions(data.suggestions || [], editable, form);
+    if (data.text) insertIntoComposer(editable, data.text);
   } catch (err) {
-    renderMessage(form, `❌ ${err.message} — is the backend running on :8000?`);
+    console.error("[grammar]", err);
+    btn.textContent = "✍️!";
+    setTimeout(() => (btn.textContent = prev), 1200);
+    return;
   } finally {
     btn.disabled = false;
-    btn.textContent = prev;
+    if (btn.textContent === "…") btn.textContent = prev;
   }
 }
 
-function renderMessage(form, text) {
-  const box = document.createElement("div");
-  box.className = "li-suggest-box";
-  box.style.cssText = SUGGEST_BOX_CSS + "font-size:12px;color:#6b7280;";
-  box.textContent = text;
-  placeBox(form, box);
+// The suggestions panel FLOATS just above the compose form (fixed position) so it
+// never pushes the compose box out of view. Tracked per-form via a WeakMap.
+const openBoxes = new WeakMap();
+const openPanels = new Set(); // for lifecycle cleanup (iterable, unlike WeakMap)
+
+// Close any panel whose chat was closed/minimized or navigated away from.
+function pruneOrphanPanels() {
+  for (const rec of openPanels) {
+    let gone;
+    try {
+      gone = !rec.form.isConnected || !rec.editable.isConnected ||
+             rec.form.getBoundingClientRect().height === 0; // closed or minimized
+    } catch { gone = true; }
+    if (gone) rec.removeBox();
+  }
 }
 
-function renderSuggestions(list, editable, form) {
+function existingBox(form) {
+  const b = openBoxes.get(form);
+  return b && b.isConnected ? b : null;
+}
+function placeBox(form, box) {
+  const old = openBoxes.get(form);
+  if (old) old.remove();
+  const r = form.getBoundingClientRect();
+  box.style.position = "fixed";
+  box.style.left = Math.round(Math.max(8, r.left)) + "px";
+  box.style.width = Math.round(Math.min(Math.max(r.width, 260), 400)) + "px";
+  box.style.bottom = Math.round(window.innerHeight - r.top + 8) + "px"; // just above the composer
+  box.style.margin = "0";
+  box.style.maxHeight = "48vh";
+  box.style.overflowY = "auto";
+  box.style.zIndex = "99999";
+  document.body.appendChild(box);   // in the top document → not clipped by the overlay
+  openBoxes.set(form, box);
+}
+
+function smallBtn(txt, title) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = txt;
+  b.title = title;
+  b.style.cssText = "background:none;border:none;font-size:15px;line-height:1;cursor:pointer;color:#6b7280;margin-left:8px;";
+  return b;
+}
+
+function handleSuggestClick(editable, form, btn) {
+  if (existingBox(form)) { existingBox(form).remove(); return; } // toggle closed
+
   const box = document.createElement("div");
   box.className = "li-suggest-box";
   box.style.cssText = SUGGEST_BOX_CSS;
 
-  // Close the panel and detach its listeners. Called by the × button and by Send.
+  const state = { tone: "", nonce: 0 };
+
+  // Close + detach listeners (× button, Send click, Enter key).
   const sendBtn = form.querySelector(".msg-form__send-button");
   let onEnter;
   const removeBox = () => {
     box.remove();
+    openBoxes.delete(form);
+    openPanels.delete(record);
     if (sendBtn) sendBtn.removeEventListener("click", removeBox);
     editable.removeEventListener("keydown", onEnter);
   };
-  // Pressing Enter (without Shift) sends the message in LinkedIn → also close.
+  const record = { form, editable, removeBox };
+  openPanels.add(record); // so it can be auto-closed when the chat closes
   onEnter = (e) => { if (e.key === "Enter" && !e.shiftKey) setTimeout(removeBox, 30); };
   if (sendBtn) sendBtn.addEventListener("click", removeBox);
   editable.addEventListener("keydown", onEnter);
 
+  // Header: title + 🔄 regenerate + × close
   const head = document.createElement("div");
   head.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
   const title = document.createElement("span");
   title.textContent = "AI Suggestions";
   title.style.cssText = "font:700 12px/1 'Inter',sans-serif;text-transform:uppercase;letter-spacing:.5px;color:#0a66c2;";
-  const close = document.createElement("button");
-  close.type = "button";
-  close.textContent = "×";
-  close.style.cssText = "background:none;border:none;font-size:18px;line-height:1;cursor:pointer;color:#9ca3af;";
+  const controls = document.createElement("div");
+  const regen = smallBtn("🔄", "Generate new suggestions");
+  const close = smallBtn("×", "Close");
+  close.style.fontSize = "18px";
+  regen.addEventListener("click", () => { state.nonce++; load(false); }); // fresh + different
   close.addEventListener("click", removeBox);
+  controls.appendChild(regen);
+  controls.appendChild(close);
   head.appendChild(title);
-  head.appendChild(close);
+  head.appendChild(controls);
   box.appendChild(head);
 
-  if (!list.length) {
-    const empty = document.createElement("div");
-    empty.textContent = "No suggestions returned.";
-    empty.style.cssText = "font-size:12px;color:#6b7280;";
-    box.appendChild(empty);
+  // Tone selector
+  const toneRow = document.createElement("div");
+  toneRow.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;";
+  const tones = ["Friendly", "Formal", "Short", "Enthusiastic"];
+  const toneBtns = {};
+  const paintTones = () => tones.forEach((t) => {
+    const active = state.tone === t;
+    toneBtns[t].style.cssText = TONE_CSS + (active ? "background:#0a66c2;color:#fff;border-color:#0a66c2;" : "");
+  });
+  tones.forEach((t) => {
+    const tb = document.createElement("button");
+    tb.type = "button";
+    tb.textContent = t;
+    tb.style.cssText = TONE_CSS;
+    tb.addEventListener("click", () => { state.tone = state.tone === t ? "" : t; paintTones(); load(true); });
+    toneBtns[t] = tb;
+    toneRow.appendChild(tb);
+  });
+  box.appendChild(toneRow);
+
+  // List container
+  const listEl = document.createElement("div");
+  box.appendChild(listEl);
+
+  const setInfo = (text, color) => {
+    listEl.innerHTML = "";
+    const d = document.createElement("div");
+    d.textContent = text;
+    d.style.cssText = `font-size:12px;color:${color || "#6b7280"};padding:4px 2px;`;
+    listEl.appendChild(d);
+  };
+
+  const renderList = (list) => {
+    listEl.innerHTML = "";
+    if (!list || !list.length) { setInfo("No suggestions."); return; }
+    let selected = null;
+    const norm = (b) => { b.style.background = "#f9fafb"; b.style.borderColor = "#e5e7eb"; };
+    const sel = (b) => { b.style.background = "#dbeafe"; b.style.borderColor = "#0a66c2"; };
+    list.forEach((text) => {
+      const wrap = document.createElement("div");
+      wrap.style.cssText = "position:relative;margin:6px 0;";
+      const item = document.createElement("button");
+      item.type = "button";
+      item.textContent = text;
+      // padding-right leaves room for the copy icon in the top corner
+      item.style.cssText = SUGGEST_ITEM_CSS + "margin:0;padding-right:34px;";
+      item.addEventListener("mouseenter", () => { if (item !== selected) { item.style.borderColor = "#0a66c2"; item.style.background = "#eef3fb"; } });
+      item.addEventListener("mouseleave", () => { item === selected ? sel(item) : norm(item); });
+      // click the message → fills the compose box automatically
+      item.addEventListener("click", () => { insertIntoComposer(editable, text); if (selected) norm(selected); selected = item; sel(item); });
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.title = "Copy to clipboard";
+      copy.textContent = "📋";
+      copy.style.cssText = COPY_CSS;
+      copy.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        try { navigator.clipboard && navigator.clipboard.writeText(text); } catch {}
+        copy.textContent = "✓";
+        setTimeout(() => (copy.textContent = "📋"), 1000);
+      });
+      wrap.appendChild(item);   // message
+      wrap.appendChild(copy);   // copy icon overlaid at top-right
+      listEl.appendChild(wrap);
+    });
+  };
+
+  // Fetch (or use cache) + render, for the current tone.
+  // Everything is inside try/catch so the panel ALWAYS shows something on open
+  // (suggestions or an error) — never a silent blank.
+  async function load(useCache) {
+    setInfo("Thinking…");
+    try {
+      const messages = scrapeConversation(editable);
+      const profile = getRecipientProfile(editable);
+      const participant = getParticipant(messages) || profile.name;
+      const sig = convoSignature(editable, messages) + "|" + state.tone;
+      if (useCache && suggestCache.has(sig)) { renderList(suggestCache.get(sig)); return; }
+      const conversation_id = getConversationId(editable);
+      const resp = await fetch(`${API_CHAT_URL}/generate-suggestions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id, participant, messages, profile, tone: state.tone, nonce: state.nonce ? String(state.nonce) : "" }),
+      });
+      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+      const data = await resp.json();
+      const list = data.suggestions || [];
+      suggestCache.set(sig, list);
+      renderList(list);
+    } catch (err) {
+      setInfo(`❌ ${err.message} — is the backend running on :8000?`, "#dc2626");
+    }
   }
 
-  // Highlight the picked suggestion; keep the panel open so another can be chosen.
-  let selected = null;
-  const norm = (b) => { b.style.background = "#f9fafb"; b.style.borderColor = "#e5e7eb"; };
-  const sel = (b) => { b.style.background = "#dbeafe"; b.style.borderColor = "#0a66c2"; };
-
-  list.forEach((text) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.textContent = text;
-    item.style.cssText = SUGGEST_ITEM_CSS;
-    item.addEventListener("mouseenter", () => { if (item !== selected) { item.style.borderColor = "#0a66c2"; item.style.background = "#eef3fb"; } });
-    item.addEventListener("mouseleave", () => { item === selected ? sel(item) : norm(item); });
-    item.addEventListener("click", () => {
-      insertIntoComposer(editable, text);   // paste into the box
-      if (selected) norm(selected);
-      selected = item; sel(item);            // mark as chosen — panel stays open
-    });
-    box.appendChild(item);
-  });
-
+  paintTones();
   placeBox(form, box);
+  load(true); // initial load (instant if cached)
 }
 
 // Write the chosen reply into LinkedIn's contenteditable composer (UI write only).
@@ -718,6 +856,18 @@ function insertIntoComposer(editable, text) {
     editable.textContent = text;
   }
   editable.dispatchEvent(new InputEvent("input", { bubbles: true }));
+
+  // Move the caret to the end and make the inserted text visible.
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(editable);
+    range.collapse(false); // to the end
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch {}
+  editable.scrollTop = editable.scrollHeight;               // scroll box to the bottom
+  try { editable.scrollIntoView({ block: "nearest" }); } catch {} // bring composer into view
 }
 
 // Mutations inside a shadow root don't bubble to a document observer, so attach
@@ -736,3 +886,13 @@ setTimeout(injectSuggestButton, 1500);
 setInterval(injectSuggestButton, 2000);
 const suggestObserver = new MutationObserver(() => injectSuggestButton());
 suggestObserver.observe(document.body, { childList: true, subtree: true });
+
+// When opening a chat from a profile's "Message" button, the overlay appears and
+// its composer gets focus a moment before our poll fires. focusin is `composed`
+// so it reaches this document listener from inside the shadow DOM — inject then,
+// so the ✨/✍️ buttons show up on the FIRST try (no need to reopen/go back).
+let _focusInjectTimer = null;
+document.addEventListener("focusin", () => {
+  clearTimeout(_focusInjectTimer);
+  _focusInjectTimer = setTimeout(injectSuggestButton, 150);
+}, true);

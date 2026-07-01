@@ -12,6 +12,9 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 OPENROUTER_URL   = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
 
+# Higher temperature = more varied wording, so Regenerate gives fresh options.
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.9"))
+
 # Try several free models in order — each has its own separate free allowance, so
 # if one is rate-limited / out of free quota ("afford 5"), the next may still work.
 FALLBACK_MODELS = [
@@ -27,7 +30,7 @@ FALLBACK_MODELS = [
 
 
 # ─── 1. Build the AI prompt ───────────────────────────────────────────────────
-def build_prompt(messages: list, participant: str = "", profile: dict = None) -> str:
+def build_prompt(messages: list, participant: str = "", profile: dict = None, tone: str = "", nonce: str = "") -> str:
     profile = profile or {}
     name = (profile.get("name") or participant or "").strip()
     headline = (profile.get("headline") or "").strip()
@@ -61,6 +64,12 @@ def build_prompt(messages: list, participant: str = "", profile: dict = None) ->
             "conversation. If a headline is given, reference what they do so it feels tailored, not generic."
         )
 
+    tone_line = f"Preferred tone: {tone}.\n" if tone else ""
+    variety_line = (
+        "These must be clearly DIFFERENT from any earlier suggestions — vary the opening, "
+        f"wording and angle. (variation #{nonce})\n" if nonce else ""
+    )
+
     return (
         "You are a LinkedIn networking assistant.\n\n"
         "Generate 3 possible messages.\n\n"
@@ -71,6 +80,8 @@ def build_prompt(messages: list, participant: str = "", profile: dict = None) ->
         "- Context aware\n"
         "- Do not mention AI\n\n"
         f"{recipient}"
+        f"{tone_line}"
+        f"{variety_line}"
         f"{task}\n"
         "Return ONLY the 3 messages, each on its own line, numbered 1., 2., 3. "
         "with no extra commentary.\n\n"
@@ -99,6 +110,7 @@ def _call_groq(prompt: str) -> str:
         json={
             "model": GROQ_MODEL,
             "max_tokens": int(os.getenv("GROQ_MAX_TOKENS", "400")),
+            "temperature": LLM_TEMPERATURE,
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=30,
@@ -135,6 +147,7 @@ def _call_openrouter(prompt: str) -> str:
         payload = {
             "model": model,
             "max_tokens": max_tokens,
+            "temperature": LLM_TEMPERATURE,
             "messages": [{"role": "user", "content": prompt}],
         }
         # one quick retry per model for transient upstream hiccups
@@ -173,8 +186,8 @@ def _parse_suggestions(text: str) -> list:
 
 
 # ─── 4. Generate suggestions from browser-supplied conversation ───────────────
-def generate_suggestions(messages: list, participant: str = "", profile: dict = None) -> list:
-    prompt = build_prompt(messages or [], participant, profile)
+def generate_suggestions(messages: list, participant: str = "", profile: dict = None, tone: str = "", nonce: str = "") -> list:
+    prompt = build_prompt(messages or [], participant, profile, tone, nonce)
 
     try:
         text = _call_llm(prompt)
@@ -187,3 +200,26 @@ def generate_suggestions(messages: list, participant: str = "", profile: dict = 
             "Appreciate the message. Could you share a bit more about what you had in mind?",
             "Great to hear from you — let's find a good time to chat.",
         ]
+
+
+# ─── 5. Grammar fix — clean up the user's own typed draft ─────────────────────
+def fix_grammar(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return ""
+    prompt = (
+        "Correct the grammar, spelling and clarity of this LinkedIn message. "
+        "Keep the same meaning, language, tone and roughly the same length. "
+        "Do not add new information, greetings or explanations. "
+        "Return ONLY the corrected message.\n\n"
+        f"Message:\n{text}"
+    )
+    try:
+        out = _call_llm(prompt).strip()
+        # strip wrapping quotes the model sometimes adds
+        if len(out) >= 2 and out[0] in "\"'" and out[-1] in "\"'":
+            out = out[1:-1].strip()
+        return out or text
+    except Exception as e:
+        print("[grammar] failed:", e)
+        return text  # fall back to the user's original draft
