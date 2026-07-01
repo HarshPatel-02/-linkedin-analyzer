@@ -51,54 +51,12 @@ function injectStyles() {
     @keyframes li-spin{to{transform:rotate(360deg);}}
     .panel-body::-webkit-scrollbar{width:5px;}
     .panel-body::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px;}
-
-    /* ── Chat Assistant ── */
-    #li-chat-btn{
-      position:fixed;bottom:28px;right:28px;width:52px;height:52px;
-      border-radius:50%;background:#0a66c2;color:#fff;border:none;cursor:pointer;
-      font-size:22px;box-shadow:0 4px 18px rgba(10,102,194,.4);
-      z-index:99999;display:flex;align-items:center;justify-content:center;
-      transition:all .2s ease;
-      font-family:'Inter',-apple-system,sans-serif;
-    }
-    #li-chat-btn:hover{background:#0958a7;transform:scale(1.08);box-shadow:0 6px 22px rgba(10,102,194,.5);}
-    #li-chat-panel{
-      position:fixed;bottom:92px;right:20px;width:360px;max-height:540px;
-      border-radius:14px;border:1px solid #e5e7eb;background:#fff;
-      box-shadow:0 8px 32px rgba(0,0,0,.14);overflow:hidden;
-      z-index:99998;font-family:'Inter',-apple-system,sans-serif;
-      display:flex;flex-direction:column;
-    }
-    #li-chat-body{padding:16px;overflow-y:auto;flex:1;}
-    #li-chat-body::-webkit-scrollbar{width:5px;}
-    #li-chat-body::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px;}
-    .chat-suggestion{
-      background:#f8faff;border:1.5px solid #dbeafe;border-radius:10px;
-      padding:12px 14px;margin-bottom:10px;transition:all .15s ease;
-    }
-    .chat-suggestion:hover{background:#eff6ff;border-color:#93c5fd;}
-    .chat-suggestion-text{font-size:14px;color:#1e293b;line-height:1.5;margin-bottom:8px;}
-    .chat-copy-btn{
-      display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;
-      color:#0a66c2;background:#fff;border:1px solid #dbeafe;
-      border-radius:6px;padding:4px 10px;cursor:pointer;transition:all .15s ease;
-      font-family:'Inter',-apple-system,sans-serif;
-    }
-    .chat-copy-btn:hover{background:#dbeafe;}
-    .chat-refresh-btn{
-      width:100%;margin-top:4px;padding:9px;border-radius:8px;
-      border:1.5px solid #e5e7eb;background:#fff;color:#6b7280;
-      font-size:13px;font-weight:600;cursor:pointer;
-      font-family:'Inter',-apple-system,sans-serif;transition:all .15s ease;
-    }
-    .chat-refresh-btn:hover{background:#f9fafb;border-color:#d1d5db;}
   `;
   document.head.appendChild(style);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function isProfilePage()   { return /linkedin\.com\/in\//i.test(window.location.href); }
-function isMessagingPage() { return /linkedin\.com\/messaging\/thread\//i.test(window.location.href); }
 
 function findActionTarget() {
   const selectors = [
@@ -448,110 +406,8 @@ function renderPanel(data) {
   `;
 }
 
-// ─── Chat Assistant Button ─────────────────────────────────────────────────────
-function chatButton() {
-  if (!isMessagingPage()) return;
-  if (document.getElementById("li-chat-btn")) return;
-  injectStyles();
-
-  const btn = document.createElement("button");
-  btn.id    = "li-chat-btn";
-  btn.title = "AI Reply Suggestions";
-  btn.textContent = "💬";
-  document.body.appendChild(btn);
-  btn.addEventListener("click", handleChatClick);
-}
-
-async function handleChatClick() {
-  const existing = document.getElementById("li-chat-panel");
-  if (existing) { existing.remove(); return; }
-
-  const panel = document.createElement("div");
-  panel.id = "li-chat-panel";
-  panel.innerHTML = `
-    <div class="panel-header" style="padding:14px 18px;">
-      <span style="font-size:16px;">💬 AI Reply</span>
-      <button class="panel-close" id="li-chat-close" style="font-size:20px;">×</button>
-    </div>
-    <div id="li-chat-body">
-      <div style="display:flex;align-items:center;gap:10px;color:#6b7280;padding:8px 0;">
-        <div style="width:16px;height:16px;border:2.5px solid #e5e7eb;border-top-color:#0a66c2;border-radius:50%;animation:li-spin .7s linear infinite;flex-shrink:0;"></div>
-        <span>Analyzing conversation...</span>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(panel);
-  document.getElementById("li-chat-close").onclick = () => panel.remove();
-
-  try {
-    const conversation_url = window.location.href.split("?")[0];
-
-    const resp = await fetch(`${API_BASE_URL}/analyze-chat`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ conversation_url, profile_url: "", messages: [] }),
-    });
-
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || `Server error ${resp.status}`);
-    }
-
-    const data        = await resp.json();
-    const suggestions = data.suggestions  || [];
-    const tone        = data.tone         || "professional";
-    const stage       = data.stage        || "";
-    const count       = data.message_count || 0;
-
-    const toneColor = tone === "casual" ? "#7c3aed" : "#0a66c2";
-
-    const suggestionsHTML = suggestions.map((s) => `
-      <div class="chat-suggestion">
-        <div class="chat-suggestion-text">${escHtml(s)}</div>
-        <button class="chat-copy-btn" data-text="${escHtml(s)}">📋 Copy</button>
-      </div>
-    `).join("");
-
-    document.getElementById("li-chat-body").innerHTML = `
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
-        <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#9ca3af;">Tone</span>
-        <span style="font-size:12px;font-weight:600;color:${toneColor};background:${toneColor}18;padding:2px 9px;border-radius:999px;">${escHtml(tone)}</span>
-        ${stage ? `<span style="font-size:12px;color:#9ca3af;background:#f3f4f6;padding:2px 9px;border-radius:999px;">${escHtml(stage)}</span>` : ""}
-        <span style="font-size:11px;color:#9ca3af;margin-left:auto;">${count} msgs</span>
-      </div>
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#9ca3af;margin-bottom:10px;">SUGGESTED REPLIES</div>
-      ${suggestionsHTML}
-      <button class="chat-refresh-btn" id="li-chat-refresh">🔄 Generate new suggestions</button>
-    `;
-
-    document.querySelectorAll(".chat-copy-btn").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(btn.dataset.text);
-          btn.textContent = "✅ Copied!";
-          setTimeout(() => { btn.textContent = "📋 Copy"; }, 1600);
-        } catch {
-          btn.textContent = "⚠️ Failed";
-        }
-      });
-    });
-
-    document.getElementById("li-chat-refresh")?.addEventListener("click", () => {
-      panel.remove();
-      handleChatClick();
-    });
-
-  } catch (err) {
-    document.getElementById("li-chat-body").innerHTML = `
-      <div style="color:#dc2626;padding:4px 0;">
-        ❌ <strong>${escHtml(err.message)}</strong>
-      </div>`;
-  }
-}
-
 // ─── Init ──────────────────────────────────────────────────────────────────────
 setTimeout(activityButton, 1500);
-setTimeout(chatButton, 1500);
 setInterval(activityButton, 3000);
 
 let lastUrl = location.href;
@@ -562,13 +418,9 @@ const observer = new MutationObserver(() => {
     document.getElementById("li-icp-btn")?.remove();
     document.getElementById("li-ai-panel")?.remove();
     document.getElementById("li-icp-panel")?.remove();
-    document.getElementById("li-chat-btn")?.remove();
-    document.getElementById("li-chat-panel")?.remove();
     setTimeout(activityButton, 1500);
-    setTimeout(chatButton, 1500);
   } else {
     activityButton();
-    chatButton();
   }
 });
 observer.observe(document.body, { childList: true, subtree: true });
