@@ -48,6 +48,14 @@ class ProfileData(BaseModel):
     posts_90_days:      int   = 0
     engagement_label:   str   = ""
 
+class SuggestionsRequest(BaseModel):
+    conversation_id: str = ""
+    participant: str = ""
+    messages: list[dict] = []   # [{sender, text}] read in the user's own browser
+
+class SuggestionsResponse(BaseModel):
+    suggestions: list[str] = []
+
 class IcpScore(BaseModel):
     name:               str   = ""   
     country:            str   = ""

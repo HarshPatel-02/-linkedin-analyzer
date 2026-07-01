@@ -51,6 +51,35 @@ function injectStyles() {
     @keyframes li-spin{to{transform:rotate(360deg);}}
     .panel-body::-webkit-scrollbar{width:5px;}
     .panel-body::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px;}
+    /* ── AI Suggest (message composer) ── */
+    .li-suggest-btn{
+      display:inline-flex;align-items:center;gap:6px;
+      margin:6px 8px;padding:6px 14px;
+      border:1.5px solid #0a66c2;border-radius:999px;
+      background:#eef3fb;color:#0a66c2;cursor:pointer;
+      font-size:13px;font-weight:600;line-height:1;
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      transition:all .15s ease;
+    }
+    .li-suggest-btn:hover{background:#0a66c2;color:#fff;box-shadow:0 2px 8px rgba(10,102,194,.25);}
+    .li-suggest-btn:disabled{opacity:.6;cursor:default;}
+    .li-suggest-box{
+      margin:6px 8px 10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;
+      background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.06);
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    .li-suggest-box-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+    .li-suggest-box-head span{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#0a66c2;}
+    .li-suggest-box-close{background:none;border:none;font-size:18px;line-height:1;cursor:pointer;color:#9ca3af;padding:0 2px;}
+    .li-suggest-box-close:hover{color:#111827;}
+    .li-suggest-item{
+      display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;
+      border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;color:#111827;
+      font-size:13px;line-height:1.45;cursor:pointer;transition:all .15s ease;
+      font-family:inherit;
+    }
+    .li-suggest-item:hover{border-color:#0a66c2;background:#eef3fb;}
+    .li-suggest-msg{font-size:12px;color:#6b7280;padding:4px 2px;}
   `;
   document.head.appendChild(style);
 }
@@ -424,3 +453,236 @@ const observer = new MutationObserver(() => {
   }
 });
 observer.observe(document.body, { childList: true, subtree: true });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AI Suggest — reply suggestions in the LinkedIn message composer
+// Self-contained: does NOT touch the Activity/ICP code above.
+// DOM is used ONLY for UI injection + writing the chosen reply — never to read
+// conversation text (that is fetched server-side via the Apify actor).
+// ═══════════════════════════════════════════════════════════════════════════
+const API_CHAT_URL = "http://localhost:8000";
+
+// LinkedIn renders the messaging overlay inside an (open) Shadow DOM, so plain
+// document.querySelector cannot see the composer or messages, and external CSS
+// cannot style anything inside it. Everything below walks shadow roots and uses
+// inline styles. DOM is used only for UI injection + writing the chosen reply.
+
+// Inline styles (external CSS can't cross the shadow boundary).
+const SUGGEST_BTN_CSS =
+  "display:inline-flex;align-items:center;gap:6px;margin:6px 8px;padding:6px 14px;" +
+  "border:1.5px solid #0a66c2;border-radius:999px;background:#eef3fb;color:#0a66c2;" +
+  "font:600 13px/1 'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;";
+const SUGGEST_BOX_CSS =
+  "margin:6px 8px 10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;" +
+  "box-shadow:0 2px 12px rgba(0,0,0,.15);font-family:'Inter',-apple-system,'Segoe UI',sans-serif;";
+const SUGGEST_ITEM_CSS =
+  "display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;border:1px solid #e5e7eb;" +
+  "border-radius:8px;background:#f9fafb;color:#111827;font:400 13px/1.45 'Inter',sans-serif;cursor:pointer;";
+
+// Collect the document plus every OPEN shadow root, recursively.
+function collectRoots() {
+  const roots = [document];
+  const walk = (root) => {
+    let els;
+    try { els = root.querySelectorAll("*"); } catch { return; }
+    els.forEach((el) => { if (el.shadowRoot) { roots.push(el.shadowRoot); walk(el.shadowRoot); } });
+  };
+  walk(document);
+  return roots;
+}
+
+// Every open "Write a message…" composer, across light DOM and shadow roots.
+function findComposers() {
+  const found = [];
+  for (const root of collectRoots()) {
+    let eds;
+    try {
+      eds = root.querySelectorAll('[contenteditable="true"], [contenteditable=""], [role="textbox"], textarea');
+    } catch { continue; }
+    eds.forEach((ed) => {
+      const label = (ed.getAttribute("aria-label") || "") + " " + (ed.getAttribute("placeholder") || "");
+      if (/message/i.test(label) || (ed.closest && ed.closest('.msg-form, [class*="msg-form"]'))) {
+        found.push(ed);
+      }
+    });
+  }
+  return found;
+}
+
+// Widest ancestor of the composer that still holds exactly ONE message list =
+// this single conversation's boundary (stop before a shared multi-chat container).
+function convoContainer(editable) {
+  let el = editable, best = null;
+  for (let i = 0; el && i < 15; i++, el = el.parentElement) {
+    if (!el.querySelectorAll) continue;
+    const n = el.querySelectorAll(".msg-s-message-list").length;
+    if (n === 1) best = el;        // still one conversation — keep widening
+    else if (n > 1) break;         // reached a container with multiple chats — stop
+  }
+  return best || editable.getRootNode();
+}
+
+// Read this conversation's messages (account-safe: never touches the session cookie).
+// Uses LinkedIn's EXACT classes — substring/wildcard selectors match sub-elements
+// (__body, __link, __profile-picture…) and massively inflate/duplicate the results.
+function scrapeConversation(editable) {
+  const container = convoContainer(editable);
+  const out = [];
+  let name = "Them";
+  container.querySelectorAll(".msg-s-event-listitem").forEach((item) => {
+    const nameEl = item.querySelector(".msg-s-message-group__name");
+    if (nameEl && nameEl.innerText.trim()) name = nameEl.innerText.trim();
+    const isOther = /--other/.test(item.className || "");
+    const bodyEl = item.querySelector(".msg-s-event__content, .msg-s-event-listitem__body");
+    const text = bodyEl ? bodyEl.innerText.trim() : "";
+    if (text) out.push({ sender: isOther ? name : "You", text });
+  });
+  return out.slice(-30); // cap the context sent to the backend
+}
+
+// Name of the person being replied to = first sender that isn't "You".
+function getParticipant(messages) {
+  const other = messages.find((m) => m.sender && m.sender !== "You");
+  return other ? other.sender : "";
+}
+
+// Conversation id (best-effort; backend uses the scraped messages, not this).
+function getConversationId(editable) {
+  const m = window.location.href.match(/\/messaging\/thread\/([^/?#]+)/);
+  if (m) return m[1];
+  const c = convoContainer(editable);
+  const urn = c.querySelector && c.querySelector("[data-event-urn]");
+  if (urn) return urn.getAttribute("data-event-urn");
+  return "current_chat_id";
+}
+
+function injectSuggestButton() {
+  ensureShadowObservers();
+  for (const editable of findComposers()) {
+    const anchor =
+      (editable.closest && (editable.closest(".msg-form") || editable.closest("form") ||
+        editable.closest('[class*="msg-form"]'))) || editable.parentElement;
+    if (!anchor || !anchor.parentElement) continue;
+    if (anchor.previousElementSibling?.classList?.contains("li-suggest-wrap")) continue;
+
+    const wrap = document.createElement("div");
+    wrap.className = "li-suggest-wrap";
+    wrap.style.cssText = "width:100%;";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "✨ AI Suggest";
+    btn.style.cssText = SUGGEST_BTN_CSS;
+    btn.addEventListener("click", () => handleSuggestClick(editable, wrap, btn));
+
+    wrap.appendChild(btn);
+    anchor.insertAdjacentElement("beforebegin", wrap);
+  }
+}
+
+async function handleSuggestClick(editable, wrap, btn) {
+  const openBox = wrap.querySelector(".li-suggest-box");
+  if (openBox) { openBox.remove(); btn.textContent = "✨ AI Suggest"; return; }
+
+  btn.disabled = true;
+  btn.textContent = "✨ Thinking…";
+  try {
+    const messages = scrapeConversation(editable);
+    const participant = getParticipant(messages);
+    const conversation_id = getConversationId(editable);
+    const resp = await fetch(`${API_CHAT_URL}/generate-suggestions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_id, participant, messages }),
+    });
+    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+    const data = await resp.json();
+    renderSuggestions(data.suggestions || [], editable, wrap);
+  } catch (err) {
+    renderMessage(wrap, `❌ ${err.message} — is the backend running on :8000?`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "✨ AI Suggest";
+  }
+}
+
+function renderMessage(wrap, text) {
+  wrap.querySelector(".li-suggest-box")?.remove();
+  const box = document.createElement("div");
+  box.className = "li-suggest-box";
+  box.style.cssText = SUGGEST_BOX_CSS + "font-size:12px;color:#6b7280;";
+  box.textContent = text;
+  wrap.appendChild(box);
+}
+
+function renderSuggestions(list, editable, wrap) {
+  wrap.querySelector(".li-suggest-box")?.remove();
+  const box = document.createElement("div");
+  box.className = "li-suggest-box";
+  box.style.cssText = SUGGEST_BOX_CSS;
+
+  const head = document.createElement("div");
+  head.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
+  const title = document.createElement("span");
+  title.textContent = "AI Suggestions";
+  title.style.cssText = "font:700 12px/1 'Inter',sans-serif;text-transform:uppercase;letter-spacing:.5px;color:#0a66c2;";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "×";
+  close.style.cssText = "background:none;border:none;font-size:18px;line-height:1;cursor:pointer;color:#9ca3af;";
+  close.addEventListener("click", () => box.remove());
+  head.appendChild(title);
+  head.appendChild(close);
+  box.appendChild(head);
+
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "No suggestions returned.";
+    empty.style.cssText = "font-size:12px;color:#6b7280;";
+    box.appendChild(empty);
+  }
+
+  list.forEach((text) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.textContent = text;
+    item.style.cssText = SUGGEST_ITEM_CSS;
+    item.addEventListener("mouseenter", () => { item.style.borderColor = "#0a66c2"; item.style.background = "#eef3fb"; });
+    item.addEventListener("mouseleave", () => { item.style.borderColor = "#e5e7eb"; item.style.background = "#f9fafb"; });
+    item.addEventListener("click", () => { insertIntoComposer(editable, text); box.remove(); });
+    box.appendChild(item);
+  });
+
+  wrap.appendChild(box);
+}
+
+// Write the chosen reply into LinkedIn's contenteditable composer (UI write only).
+function insertIntoComposer(editable, text) {
+  editable.focus();
+  try {
+    editable.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = text;
+    editable.appendChild(p);
+  } catch {
+    editable.textContent = text;
+  }
+  editable.dispatchEvent(new InputEvent("input", { bubbles: true }));
+}
+
+// Mutations inside a shadow root don't bubble to a document observer, so attach
+// an observer to each shadow root we discover (once).
+const _observedRoots = new WeakSet();
+function ensureShadowObservers() {
+  for (const root of collectRoots()) {
+    if (root === document || _observedRoots.has(root)) continue;
+    _observedRoots.add(root);
+    new MutationObserver(() => injectSuggestButton()).observe(root, { childList: true, subtree: true });
+  }
+}
+
+// Lifecycle: detect chat popups/threads opening (light DOM + shadow DOM + poll).
+setTimeout(injectSuggestButton, 1500);
+setInterval(injectSuggestButton, 2000);
+const suggestObserver = new MutationObserver(() => injectSuggestButton());
+suggestObserver.observe(document.body, { childList: true, subtree: true });
