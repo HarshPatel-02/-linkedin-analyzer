@@ -12,7 +12,8 @@
   "host_permissions": [
     "https://www.linkedin.com/*",
     "http://127.0.0.1:8000/*",
-    "http://localhost:8000/*"
+    "http://localhost:8000/*",
+    "https://linkedin-analyzer-90ne.onrender.com/*"
   ],
   "action": {
     "default_popup": "popup.html",

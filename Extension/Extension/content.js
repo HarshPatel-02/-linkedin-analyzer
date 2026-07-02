@@ -476,7 +476,8 @@ observer.observe(document.body, { childList: true, subtree: true });
 // DOM is used ONLY for UI injection + writing the chosen reply — never to read
 // conversation text (that is fetched server-side via the Apify actor).
 // ═══════════════════════════════════════════════════════════════════════════
-const API_CHAT_URL = "http://localhost:8000";
+// const API_CHAT_URL = "http://localhost:8000"; // local dev
+const API_CHAT_URL = "https://linkedin-analyzer-90ne.onrender.com"; // live (Render)
 
 // LinkedIn renders the messaging overlay inside an (open) Shadow DOM, so plain
 // document.querySelector cannot see the composer or messages, and external CSS
