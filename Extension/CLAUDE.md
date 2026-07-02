@@ -9,11 +9,10 @@ AI reply suggestions / grammar fixes inside chat, cookie-free (no account logout
 - Extension: Chrome MV3 — `Extension/content.js`, `background.js`, `manifest.json`, `popup.html`
 - Backend: FastAPI (Python) — `main.py`, `models.py`, `services/*`
 - Scraping: Apify actors (profile/posts/company) via `APIFY_API_TOKEN`
-- AI: Groq `llama-3.3-70b-versatile` (primary) → OpenRouter free models (fallback)
+- AI: Groq `llama-3.3-70b-versatile` (via `GROQ_MODEL`)
 - Deploy: Render (`https://linkedin-analyzer-90ne.onrender.com`) for Activity/ICP;
   AI suggestions currently hit `http://localhost:8000`
-- Secrets in `Extension/.env` (gitignored): APIFY_API_TOKEN, GROQ_API_KEY,
-  OPENROUTER_API_KEY, ANTHROPIC_API_KEY
+- Secrets in `Extension/.env` (gitignored): APIFY_API_TOKEN, GROQ_API_KEY
 
 **Endpoints:** `/analyze`, `/icp-score`, `/generate-suggestions`, `/grammar-fix`, `/health`
 
@@ -26,7 +25,7 @@ floating auto-closing panel. Backend on Groq.
 - Removed old cookie-based chat (server used user's li_at on Apify → LinkedIn logouts).
 - Read the open conversation from the browser DOM (safe) instead of Apify actor
   `wVzvCSQjiaxpbxvqM` (which requires a LinkedIn cookie).
-- AI = Groq free (Anthropic had no credits; OpenRouter $0 has a ~50/day free cap).
+- AI = Groq free (Anthropic had no credits; OpenRouter dropped — $0 had a ~50/day cap).
 - No auto-send/automation — user always presses Send (keeps account safe).
 
 **Project rules**

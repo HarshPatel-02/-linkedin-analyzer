@@ -1,28 +1,13 @@
 import os
-import time
 import requests
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-# Primary provider: Groq (fast + generous free tier). Set GROQ_API_KEY in .env.
-# Fallback provider: OpenRouter (OpenAI-compatible). Set OPENROUTER_API_KEY.
-# Whichever key is present is used; if both are set, Groq is tried first.
+# Provider: Groq (fast + generous free tier). Set GROQ_API_KEY in .env.
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-OPENROUTER_URL   = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
-
 # Higher temperature = more varied wording, so Regenerate gives fresh options.
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.9"))
-
-# Try several free models in order — each has its own separate free allowance, so
-# if one is rate-limited / out of free quota ("afford 5"), the next may still work.
-FALLBACK_MODELS = [
-    OPENROUTER_MODEL,
-    "openai/gpt-oss-20b:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-]
 
 # Conversation context is read in the user's OWN logged-in browser tab and sent
 # here as `messages`. No LinkedIn cookie and no Apify actor are involved, so this
@@ -89,21 +74,11 @@ def build_prompt(messages: list, participant: str = "", profile: dict = None, to
     )
 
 
-# ─── 2. Call the LLM ──────────────────────────────────────────────────────────
+# ─── 2. Call the LLM (Groq) ───────────────────────────────────────────────────
 def _call_llm(prompt: str) -> str:
-    # Prefer Groq when its key is set (fast, generous free tier).
-    if os.getenv("GROQ_API_KEY"):
-        try:
-            return _call_groq(prompt)
-        except Exception as e:
-            print("[suggestions] groq failed, trying openrouter:", e)
-    return _call_openrouter(prompt)
-
-
-def _call_groq(prompt: str) -> str:
     key = os.getenv("GROQ_API_KEY")
     if not key:
-        raise Exception("GROQ_API_KEY is not set")
+        raise Exception("GROQ_API_KEY is not set in environment variables")
     resp = requests.post(
         GROQ_URL,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -121,50 +96,6 @@ def _call_groq(prompt: str) -> str:
         raise Exception("Groq returned empty content")
     print(f"[suggestions] provider: groq ({GROQ_MODEL})")
     return text
-
-
-def _call_openrouter(prompt: str) -> str:
-    key = os.getenv("OPENROUTER_API_KEY")
-    if not key:
-        raise Exception("OPENROUTER_API_KEY is not set in environment variables")
-
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        # optional attribution headers OpenRouter recommends
-        "HTTP-Referer": "https://linkedin-analyzer.local",
-        "X-Title": "LinkedIn AI Reply",
-    }
-    max_tokens = int(os.getenv("OPENROUTER_MAX_TOKENS", "200"))
-    # de-dupe the model list while preserving order
-    models, seen = [], set()
-    for m in FALLBACK_MODELS:
-        if m and m not in seen:
-            seen.add(m); models.append(m)
-
-    last = None
-    for model in models:
-        payload = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "temperature": LLM_TEMPERATURE,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        # one quick retry per model for transient upstream hiccups
-        for attempt in range(2):
-            resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 200:
-                text = resp.json()["choices"][0]["message"]["content"]
-                if text and text.strip():
-                    print(f"[suggestions] model used: {model}")
-                    return text
-                break  # empty body — try next model
-            last = f"{model} -> {resp.status_code}: {resp.text[:120]}"
-            if resp.status_code in (429, 502, 503):
-                time.sleep(1.2)
-                continue
-            break  # 402/400/etc — move to the next model
-    raise Exception(f"All free models failed. Last: {last}")
 
 
 # ─── 3. Parse LLM output into exactly 3 suggestions ───────────────────────────
