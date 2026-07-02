@@ -51,6 +51,35 @@ function injectStyles() {
     @keyframes li-spin{to{transform:rotate(360deg);}}
     .panel-body::-webkit-scrollbar{width:5px;}
     .panel-body::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px;}
+    /* ── AI Suggest (message composer) ── */
+    .li-suggest-btn{
+      display:inline-flex;align-items:center;gap:6px;
+      margin:6px 8px;padding:6px 14px;
+      border:1.5px solid #0a66c2;border-radius:999px;
+      background:#eef3fb;color:#0a66c2;cursor:pointer;
+      font-size:13px;font-weight:600;line-height:1;
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      transition:all .15s ease;
+    }
+    .li-suggest-btn:hover{background:#0a66c2;color:#fff;box-shadow:0 2px 8px rgba(10,102,194,.25);}
+    .li-suggest-btn:disabled{opacity:.6;cursor:default;}
+    .li-suggest-box{
+      margin:6px 8px 10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;
+      background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.06);
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    .li-suggest-box-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+    .li-suggest-box-head span{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#0a66c2;}
+    .li-suggest-box-close{background:none;border:none;font-size:18px;line-height:1;cursor:pointer;color:#9ca3af;padding:0 2px;}
+    .li-suggest-box-close:hover{color:#111827;}
+    .li-suggest-item{
+      display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;
+      border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;color:#111827;
+      font-size:13px;line-height:1.45;cursor:pointer;transition:all .15s ease;
+      font-family:inherit;
+    }
+    .li-suggest-item:hover{border-color:#0a66c2;background:#eef3fb;}
+    .li-suggest-msg{font-size:12px;color:#6b7280;padding:4px 2px;}
   `;
   document.head.appendChild(style);
 }
@@ -85,6 +114,25 @@ function escHtml(str) {
   return String(str ?? "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// Turn a client-side error into a clean user-facing message (hide "Failed to fetch").
+function clientErrorMessage(err) {
+  const m = (err && err.message) || "";
+  if (!m || /failed to fetch|networkerror|load failed|network request failed/i.test(m)) {
+    return "Server error. Please try again later.";
+  }
+  return m;
+}
+
+// Professional error card shown inside a panel body.
+function errorCardHTML(message) {
+  return `
+    <div style="padding:28px 20px;text-align:center;font-family:'Inter',-apple-system,sans-serif;">
+      <div style="width:44px;height:44px;border-radius:50%;background:#fef2f2;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px;font-size:22px;">⚠️</div>
+      <div style="font-size:15px;font-weight:700;color:#111827;margin-bottom:4px;">Something went wrong</div>
+      <div style="font-size:13px;color:#6b7280;line-height:1.5;">${escHtml(message)}</div>
+    </div>`;
 }
 
 function safeUrl(u) {
@@ -204,13 +252,8 @@ async function handleAnalyzeClick() {
     renderPanel(apiData);
 
   } catch (err) {
-    console.error("[LI-AI] ❌", err);
-    document.getElementById("li-ai-body").innerHTML = `
-      <div style="color:#dc2626;padding:16px;">
-        ❌ <strong>${escHtml(err.message)}</strong><br><br>
-        Make sure the server is running:<br>
-        <code style="font-size:12px;color:#9ca3af;">uvicorn main:app --reload</code>
-      </div>`;
+    console.error("[LI-AI]", err);
+    (document.getElementById("li-ai-body") || {}).innerHTML = errorCardHTML(clientErrorMessage(err));
   }
 }
 
@@ -252,7 +295,10 @@ async function ICPButton() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile_url }),
       });
-      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+      if (!resp.ok) {
+        const b = await resp.json().catch(() => ({}));
+        throw new Error(b.detail || `Server error ${resp.status}`);
+      }
       result = await resp.json();
       await cacheSet(cacheKey, result);
     }
@@ -277,7 +323,7 @@ async function ICPButton() {
     const icpColor = result.icp_score >= 70 ? "#059669" : result.icp_score >= 40 ? "#eab308" : "#dc2626";
     const icpLabel = result.icp_score >= 70 ? "Good Match" : result.icp_score >= 40 ? "Need Nurturing" : "Poor Match";
     const icpSub   = result.icp_score >= 70 ? "This lead aligns well with your ideal customer profile." : result.icp_score >= 40 ? "Build engagement to improve outreach success." : "This lead is outside your ideal customer profile.";
-    document.getElementById("li-icp-body").innerHTML = `
+    (document.getElementById("li-icp-body") || {}).innerHTML = `
       <div style="padding:16px;">
         <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;">
           ${scoreCircle(result.icp_score, 100, icpColor)}
@@ -294,8 +340,7 @@ async function ICPButton() {
         ${rows}
       </div>`;
   } catch (err) {
-    document.getElementById("li-icp-body").innerHTML = `
-      <div style="color:#dc2626;padding:16px;">❌ ${escHtml(err.message)}</div>`;
+    (document.getElementById("li-icp-body") || {}).innerHTML = errorCardHTML(clientErrorMessage(err));
   }
 }
 
@@ -387,7 +432,7 @@ function renderPanel(data) {
   const cleanLabel = score_total >= 70 ? "Ready to Engage" : score_total >= 40 ? "Needs Nurturing" : "Difficult to Engage";
   const actSub     = score_total >= 70 ? "High outreach potential — great time to connect." : score_total >= 40 ? "Moderate potential — consider warming up first." : "Low engagement may not respond well.";
 
-  document.getElementById("li-ai-body").innerHTML = `
+  (document.getElementById("li-ai-body") || {}).innerHTML = `
     <div style="padding:18px;margin-bottom:14px;">
       <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e5e7eb;">
         ${scoreCircle(score_total, 100, scoreColor)}
@@ -424,3 +469,491 @@ const observer = new MutationObserver(() => {
   }
 });
 observer.observe(document.body, { childList: true, subtree: true });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AI Suggest — reply suggestions in the LinkedIn message composer
+// Self-contained: does NOT touch the Activity/ICP code above.
+// DOM is used ONLY for UI injection + writing the chosen reply — never to read
+// conversation text (that is fetched server-side via the Apify actor).
+// ═══════════════════════════════════════════════════════════════════════════
+const API_CHAT_URL = "http://localhost:8000";
+
+// LinkedIn renders the messaging overlay inside an (open) Shadow DOM, so plain
+// document.querySelector cannot see the composer or messages, and external CSS
+// cannot style anything inside it. Everything below walks shadow roots and uses
+// inline styles. DOM is used only for UI injection + writing the chosen reply.
+
+// Inline styles (external CSS can't cross the shadow boundary).
+// Icon-only button, styled to sit inline with LinkedIn's footer action icons.
+const SUGGEST_BTN_CSS =
+  "display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;" +
+  "margin:0 2px;padding:0;border:none;border-radius:50%;background:transparent;color:#0a66c2;" +
+  "font-size:16px;line-height:1;cursor:pointer;flex-shrink:0;";
+const SUGGEST_BOX_CSS =
+  "margin:6px 8px 10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;" +
+  "box-shadow:0 2px 12px rgba(0,0,0,.15);font-family:'Inter',-apple-system,'Segoe UI',sans-serif;";
+const SUGGEST_ITEM_CSS =
+  "display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;border:1px solid #e5e7eb;" +
+  "border-radius:8px;background:#f9fafb;color:#111827;font:400 13px/1.45 'Inter',sans-serif;cursor:pointer;";
+const TONE_CSS =
+  "padding:3px 10px;border:1px solid #cbd5e1;border-radius:999px;background:#fff;color:#374151;" +
+  "font:600 11px/1 'Inter',sans-serif;cursor:pointer;";
+const COPY_CSS =
+  "position:absolute;top:6px;right:6px;width:24px;height:24px;padding:0;border:none;border-radius:6px;" +
+  "background:rgba(255,255,255,.85);cursor:pointer;font-size:13px;line-height:1;";
+
+// In-memory cache of suggestions per (conversation + tone). Cleared on page reload.
+const suggestCache = new Map();
+function convoSignature(editable, messages) {
+  const last = messages.length ? (messages[messages.length - 1].text || "") : "new";
+  return getConversationId(editable) + "|" + messages.length + "|" + last.slice(0, 40);
+}
+
+// Collect the document plus every OPEN shadow root, recursively.
+function collectRoots() {
+  const roots = [document];
+  const walk = (root) => {
+    let els;
+    try { els = root.querySelectorAll("*"); } catch { return; }
+    els.forEach((el) => { if (el.shadowRoot) { roots.push(el.shadowRoot); walk(el.shadowRoot); } });
+  };
+  walk(document);
+  return roots;
+}
+
+// Every open "Write a message…" composer, across light DOM and shadow roots.
+function findComposers() {
+  const found = [];
+  for (const root of collectRoots()) {
+    let eds;
+    try {
+      eds = root.querySelectorAll('[contenteditable="true"], [contenteditable=""], [role="textbox"], textarea');
+    } catch { continue; }
+    eds.forEach((ed) => {
+      const label = (ed.getAttribute("aria-label") || "") + " " + (ed.getAttribute("placeholder") || "");
+      if (/message/i.test(label) || (ed.closest && ed.closest('.msg-form, [class*="msg-form"]'))) {
+        found.push(ed);
+      }
+    });
+  }
+  return found;
+}
+
+// Widest ancestor of the composer that still holds exactly ONE message list =
+// this single conversation's boundary (stop before a shared multi-chat container).
+function convoContainer(editable) {
+  let el = editable, best = null;
+  for (let i = 0; el && i < 15; i++, el = el.parentElement) {
+    if (!el.querySelectorAll) continue;
+    const n = el.querySelectorAll(".msg-s-message-list").length;
+    if (n === 1) best = el;        // still one conversation — keep widening
+    else if (n > 1) break;         // reached a container with multiple chats — stop
+  }
+  return best || editable.getRootNode();
+}
+
+// Read this conversation's messages (account-safe: never touches the session cookie).
+// Uses LinkedIn's EXACT classes — substring/wildcard selectors match sub-elements
+// (__body, __link, __profile-picture…) and massively inflate/duplicate the results.
+function scrapeConversation(editable) {
+  const container = convoContainer(editable);
+  const out = [];
+  let name = "Them";
+  container.querySelectorAll(".msg-s-event-listitem").forEach((item) => {
+    const nameEl = item.querySelector(".msg-s-message-group__name");
+    if (nameEl && nameEl.innerText.trim()) name = nameEl.innerText.trim();
+    const isOther = /--other/.test(item.className || "");
+    const bodyEl = item.querySelector(".msg-s-event__content, .msg-s-event-listitem__body");
+    const text = bodyEl ? bodyEl.innerText.trim() : "";
+    if (text) out.push({ sender: isOther ? name : "You", text });
+  });
+  return out.slice(-30); // cap the context sent to the backend
+}
+
+// Name of the person being replied to = first sender that isn't "You".
+function getParticipant(messages) {
+  const other = messages.find((m) => m.sender && m.sender !== "You");
+  return other ? other.sender : "";
+}
+
+// Recipient's name + LinkedIn headline from the chat header (used to personalize
+// a FIRST message when there are no prior messages to reply to).
+function getRecipientProfile(editable) {
+  let el = editable, container = null;
+  for (let i = 0; el && i < 20; i++, el = el.parentElement) {
+    if (
+      el.querySelector &&
+      el.querySelector(".artdeco-entity-lockup__title, .msg-entity-lockup__entity-title") &&
+      el.querySelector(".artdeco-entity-lockup__subtitle, .msg-entity-lockup__entity-subtitle")
+    ) { container = el; break; } // nearest header block holding both name + headline
+  }
+  if (!container) return { name: "", headline: "" };
+  const t = container.querySelector(".artdeco-entity-lockup__title, .msg-entity-lockup__entity-title");
+  const s = container.querySelector(".artdeco-entity-lockup__subtitle, .msg-entity-lockup__entity-subtitle");
+  return {
+    name: t ? t.innerText.trim().split("\n")[0].trim() : "",
+    headline: s ? s.innerText.trim().replace(/\s+/g, " ") : "",
+  };
+}
+
+// Conversation id (best-effort; backend uses the scraped messages, not this).
+function getConversationId(editable) {
+  const m = window.location.href.match(/\/messaging\/thread\/([^/?#]+)/);
+  if (m) return m[1];
+  const c = convoContainer(editable);
+  const urn = c.querySelector && c.querySelector("[data-event-urn]");
+  if (urn) return urn.getAttribute("data-event-urn");
+  return "current_chat_id";
+}
+
+function hoverBg(btn) {
+  btn.addEventListener("mouseenter", () => { btn.style.background = "rgba(0,0,0,.08)"; });
+  btn.addEventListener("mouseleave", () => { btn.style.background = "transparent"; });
+}
+
+// Small transient message at the bottom of the screen (for grammar fix feedback).
+function showToast(msg) {
+  const t = document.createElement("div");
+  t.textContent = msg;
+  t.style.cssText =
+    "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;" +
+    "padding:10px 16px;border-radius:8px;font:500 13px/1.3 'Inter',sans-serif;max-width:360px;" +
+    "z-index:100000;box-shadow:0 4px 16px rgba(0,0,0,.3);";
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2800);
+}
+
+function injectSuggestButton() {
+  ensureShadowObservers();
+  pruneOrphanPanels(); // close panels whose chat was closed/navigated away
+  for (const editable of findComposers()) {
+    const form = (editable.closest && (editable.closest(".msg-form") || editable.closest("form"))) || null;
+    if (!form) continue;
+    // put the icons next to LinkedIn's footer icons (attach / GIF / emoji)
+    const actions = form.querySelector(".msg-form__left-actions") || form;
+    if (actions.querySelector(".li-suggest-btn")) continue; // already added to this composer
+
+    // ✨ AI Suggest
+    const btn = document.createElement("button");
+    btn.className = "li-suggest-btn";
+    btn.type = "button";
+    btn.title = "AI Suggest reply";
+    btn.textContent = "✨";
+    btn.style.cssText = SUGGEST_BTN_CSS;
+    hoverBg(btn);
+    btn.addEventListener("click", () => handleSuggestClick(editable, form, btn));
+    actions.appendChild(btn);
+
+    // ✍️ Grammar fix (cleans up the user's own typed draft)
+    const gbtn = document.createElement("button");
+    gbtn.className = "li-grammar-btn";
+    gbtn.type = "button";
+    gbtn.title = "Fix grammar of your draft";
+    gbtn.textContent = "✍️";
+    gbtn.style.cssText = SUGGEST_BTN_CSS;
+    hoverBg(gbtn);
+    gbtn.addEventListener("click", () => handleGrammarFix(editable, gbtn));
+    actions.appendChild(gbtn);
+  }
+}
+
+// Clean up the user's own typed draft in place.
+async function handleGrammarFix(editable, btn) {
+  const text = (editable.innerText || "").trim();
+  const prev = btn.textContent;
+  if (!text) { showToast("✍️ Type a message first, then click to fix its grammar."); return; }
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    let resp;
+    try {
+      resp = await fetch(`${API_CHAT_URL}/grammar-fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+    } catch (netErr) {
+      showToast("Server error. Please try again later.");
+      return;
+    }
+    if (!resp.ok) {
+      showToast(`Server error ${resp.status}. Check the backend logs.`);
+      return;
+    }
+    const data = await resp.json();
+    if (data.error) showToast("⚠️ " + data.error);         // clear reason
+    else if (data.text) insertIntoComposer(editable, data.text);
+  } finally {
+    btn.disabled = false;
+    if (btn.textContent === "…") btn.textContent = prev;
+  }
+}
+
+// The suggestions panel FLOATS just above the compose form (fixed position) so it
+// never pushes the compose box out of view. Tracked per-form via a WeakMap.
+const openBoxes = new WeakMap();
+const openPanels = new Set(); // for lifecycle cleanup (iterable, unlike WeakMap)
+
+// Close any panel whose chat was closed/minimized or navigated away from.
+function pruneOrphanPanels() {
+  for (const rec of openPanels) {
+    let gone;
+    try {
+      gone = !rec.form.isConnected || !rec.editable.isConnected ||
+             rec.form.getBoundingClientRect().height === 0; // closed or minimized
+    } catch { gone = true; }
+    if (gone) rec.removeBox();
+  }
+}
+
+function existingBox(form) {
+  const b = openBoxes.get(form);
+  return b && b.isConnected ? b : null;
+}
+function placeBox(form, box) {
+  const old = openBoxes.get(form);
+  if (old) old.remove();
+  const r = form.getBoundingClientRect();
+  box.style.position = "fixed";
+  box.style.left = Math.round(Math.max(8, r.left)) + "px";
+  box.style.width = Math.round(Math.min(Math.max(r.width, 260), 400)) + "px";
+  box.style.bottom = Math.round(window.innerHeight - r.top + 8) + "px"; // just above the composer
+  box.style.margin = "0";
+  box.style.maxHeight = "48vh";
+  box.style.overflowY = "auto";
+  box.style.zIndex = "99999";
+  document.body.appendChild(box);   // in the top document → not clipped by the overlay
+  openBoxes.set(form, box);
+}
+
+function smallBtn(txt, title) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = txt;
+  b.title = title;
+  b.style.cssText = "background:none;border:none;font-size:15px;line-height:1;cursor:pointer;color:#6b7280;margin-left:8px;";
+  return b;
+}
+
+function handleSuggestClick(editable, form, btn) {
+  if (existingBox(form)) { existingBox(form).remove(); return; } // toggle closed
+
+  const box = document.createElement("div");
+  box.className = "li-suggest-box";
+  box.style.cssText = SUGGEST_BOX_CSS;
+
+  const state = { tone: "", nonce: 0 };
+
+  // Close + detach listeners (× button, Send click, Enter key).
+  const sendBtn = form.querySelector(".msg-form__send-button");
+  let onEnter;
+  const removeBox = () => {
+    box.remove();
+    openBoxes.delete(form);
+    openPanels.delete(record);
+    if (sendBtn) sendBtn.removeEventListener("click", removeBox);
+    editable.removeEventListener("keydown", onEnter);
+  };
+  const record = { form, editable, removeBox };
+  openPanels.add(record); // so it can be auto-closed when the chat closes
+  onEnter = (e) => { if (e.key === "Enter" && !e.shiftKey) setTimeout(removeBox, 30); };
+  if (sendBtn) sendBtn.addEventListener("click", removeBox);
+  editable.addEventListener("keydown", onEnter);
+
+  // Header: title + 🔄 regenerate + × close
+  const head = document.createElement("div");
+  head.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;";
+  const title = document.createElement("span");
+  title.textContent = "AI Suggestions";
+  title.style.cssText = "font:700 12px/1 'Inter',sans-serif;text-transform:uppercase;letter-spacing:.5px;color:#0a66c2;";
+  const controls = document.createElement("div");
+  const regen = smallBtn("🔄", "Generate new suggestions");
+  const close = smallBtn("×", "Close");
+  close.style.fontSize = "18px";
+  regen.addEventListener("click", () => { state.nonce++; load(false); }); // fresh + different
+  close.addEventListener("click", removeBox);
+  controls.appendChild(regen);
+  controls.appendChild(close);
+  head.appendChild(title);
+  head.appendChild(controls);
+  box.appendChild(head);
+
+  // Tone selector
+  const toneRow = document.createElement("div");
+  toneRow.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;";
+  const tones = ["Friendly", "Formal", "Short", "Enthusiastic"];
+  const toneBtns = {};
+  const paintTones = () => tones.forEach((t) => {
+    const active = state.tone === t;
+    toneBtns[t].style.cssText = TONE_CSS + (active ? "background:#0a66c2;color:#fff;border-color:#0a66c2;" : "");
+  });
+  tones.forEach((t) => {
+    const tb = document.createElement("button");
+    tb.type = "button";
+    tb.textContent = t;
+    tb.style.cssText = TONE_CSS;
+    tb.addEventListener("click", () => { state.tone = state.tone === t ? "" : t; paintTones(); load(true); });
+    toneBtns[t] = tb;
+    toneRow.appendChild(tb);
+  });
+  box.appendChild(toneRow);
+
+  // List container
+  const listEl = document.createElement("div");
+  box.appendChild(listEl);
+
+  const setInfo = (text, color) => {
+    listEl.innerHTML = "";
+    const d = document.createElement("div");
+    d.textContent = text;
+    d.style.cssText = `font-size:12px;color:${color || "#6b7280"};padding:4px 2px;`;
+    listEl.appendChild(d);
+  };
+
+  const renderList = (list, errorMsg) => {
+    listEl.innerHTML = "";
+    if (errorMsg) {
+      const warn = document.createElement("div");
+      warn.textContent = "⚠️ " + errorMsg;
+      warn.style.cssText =
+        "font-size:12px;color:#92400e;background:#fef3c7;border:1px solid #fde68a;" +
+        "border-radius:8px;padding:8px 10px;margin-bottom:8px;";
+      listEl.appendChild(warn);
+    }
+    if (!list || !list.length) { if (!errorMsg) setInfo("No suggestions."); return; }
+    let selected = null;
+    const norm = (b) => { b.style.background = "#f9fafb"; b.style.borderColor = "#e5e7eb"; };
+    const sel = (b) => { b.style.background = "#dbeafe"; b.style.borderColor = "#0a66c2"; };
+    list.forEach((text) => {
+      const wrap = document.createElement("div");
+      wrap.style.cssText = "position:relative;margin:6px 0;";
+      const item = document.createElement("button");
+      item.type = "button";
+      item.textContent = text;
+      // padding-right leaves room for the copy icon in the top corner
+      item.style.cssText = SUGGEST_ITEM_CSS + "margin:0;padding-right:34px;";
+      item.addEventListener("mouseenter", () => { if (item !== selected) { item.style.borderColor = "#0a66c2"; item.style.background = "#eef3fb"; } });
+      item.addEventListener("mouseleave", () => { item === selected ? sel(item) : norm(item); });
+      // click the message → fills the compose box automatically
+      item.addEventListener("click", () => { insertIntoComposer(editable, text); if (selected) norm(selected); selected = item; sel(item); });
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.title = "Copy to clipboard";
+      copy.textContent = "📋";
+      copy.style.cssText = COPY_CSS;
+      copy.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        try { navigator.clipboard && navigator.clipboard.writeText(text); } catch {}
+        copy.textContent = "✓";
+        setTimeout(() => (copy.textContent = "📋"), 1000);
+      });
+      wrap.appendChild(item);   // message
+      wrap.appendChild(copy);   // copy icon overlaid at top-right
+      listEl.appendChild(wrap);
+    });
+  };
+
+  // Fetch (or use cache) + render, for the current tone.
+  // Everything is inside try/catch so the panel ALWAYS shows something on open
+  // (suggestions or an error) — never a silent blank.
+  async function load(useCache) {
+    setInfo("Thinking…");
+
+    // 1) read the conversation from the page
+    let messages, profile, participant, sig, conversation_id;
+    try {
+      messages = scrapeConversation(editable);
+      profile = getRecipientProfile(editable);
+      participant = getParticipant(messages) || profile.name;
+      sig = convoSignature(editable, messages) + "|" + state.tone;
+      conversation_id = getConversationId(editable);
+    } catch (e) {
+      setInfo("Couldn't read this conversation. Try reopening the chat.", "#dc2626");
+      return;
+    }
+    if (useCache && suggestCache.has(sig)) { renderList(suggestCache.get(sig)); return; }
+
+    // 2) call the backend — separate "unreachable" from "server responded with error"
+    let resp;
+    try {
+      resp = await fetch(`${API_CHAT_URL}/generate-suggestions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id, participant, messages, profile, tone: state.tone, nonce: state.nonce ? String(state.nonce) : "" }),
+      });
+    } catch (netErr) {
+      setInfo("Server error. Please try again later.", "#dc2626");
+      return;
+    }
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch {}
+      setInfo(`Server error ${resp.status}${detail ? " — " + detail : ""}. Check the backend logs.`, "#dc2626");
+      return;
+    }
+
+    // 3) success — the AI may still report a friendly error in data.error
+    let data;
+    try { data = await resp.json(); } catch { setInfo("Unexpected response from the server.", "#dc2626"); return; }
+    const list = data.suggestions || [];
+    suggestCache.set(sig, list);
+    renderList(list, data.error || "");
+  }
+
+  paintTones();
+  placeBox(form, box);
+  load(true); // initial load (instant if cached)
+}
+
+// Write the chosen reply into LinkedIn's contenteditable composer (UI write only).
+function insertIntoComposer(editable, text) {
+  editable.focus();
+  try {
+    editable.innerHTML = "";
+    const p = document.createElement("p");
+    p.textContent = text;
+    editable.appendChild(p);
+  } catch {
+    editable.textContent = text;
+  }
+  editable.dispatchEvent(new InputEvent("input", { bubbles: true }));
+
+  // Move the caret to the end and make the inserted text visible.
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(editable);
+    range.collapse(false); // to the end
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch {}
+  editable.scrollTop = editable.scrollHeight;               // scroll box to the bottom
+  try { editable.scrollIntoView({ block: "nearest" }); } catch {} // bring composer into view
+}
+
+// Mutations inside a shadow root don't bubble to a document observer, so attach
+// an observer to each shadow root we discover (once).
+const _observedRoots = new WeakSet();
+function ensureShadowObservers() {
+  for (const root of collectRoots()) {
+    if (root === document || _observedRoots.has(root)) continue;
+    _observedRoots.add(root);
+    new MutationObserver(() => injectSuggestButton()).observe(root, { childList: true, subtree: true });
+  }
+}
+
+// Lifecycle: detect chat popups/threads opening (light DOM + shadow DOM + poll).
+setTimeout(injectSuggestButton, 1500);
+setInterval(injectSuggestButton, 2000);
+const suggestObserver = new MutationObserver(() => injectSuggestButton());
+suggestObserver.observe(document.body, { childList: true, subtree: true });
+
+// When opening a chat from a profile's "Message" button, the overlay appears and
+// its composer gets focus a moment before our poll fires. focusin is `composed`
+// so it reaches this document listener from inside the shadow DOM — inject then,
+// so the ✨/✍️ buttons show up on the FIRST try (no need to reopen/go back).
+let _focusInjectTimer = null;
+document.addEventListener("focusin", () => {
+  clearTimeout(_focusInjectTimer);
+  _focusInjectTimer = setTimeout(injectSuggestButton, 150);
+}, true);
