@@ -117,20 +117,33 @@ def _parse_suggestions(text: str) -> list:
 
 
 # ─── 4. Generate suggestions from browser-supplied conversation ───────────────
+# Generic replies shown (with a friendly error banner) when the AI call fails.
+FALLBACK_SUGGESTIONS = [
+    "Thanks for reaching out happy to connect!",
+    "Appreciate the message. Could you share a bit more about what you had in mind?",
+    "Great to hear from you let's find a good time to chat.",
+]
+
+
+def friendly_error(e) -> str:
+    """Turn a raw exception into a short, plain-English message for the user."""
+    msg = str(e)
+    low = msg.lower()
+    if "not set" in low or "missing" in low:
+        return "AI key missing — set GROQ_API_KEY in the backend .env file."
+    if "401" in msg or "invalid" in low or "unauthor" in low:
+        return "Groq API key is invalid — check it at console.groq.com/keys."
+    if "429" in msg or "rate limit" in low or "quota" in low or "too many" in low:
+        return "Groq rate limit reached — wait a minute and try again."
+    if any(w in low for w in ("timed out", "timeout", "connection", "resolve", "network")):
+        return "Couldn't reach the AI service — check your internet connection."
+    return "AI service error — please try again in a moment."
+
+
 def generate_suggestions(messages: list, participant: str = "", profile: dict = None, tone: str = "", nonce: str = "") -> list:
     prompt = build_prompt(messages or [], participant, profile, tone, nonce)
-
-    try:
-        text = _call_llm(prompt)
-        return _parse_suggestions(text)
-    except Exception as e:
-        print("[suggestions] llm call failed:", e)
-        # Never break the UI — return safe generic replies.
-        return [
-            "Thanks for reaching out happy to connect!",
-            "Appreciate the message. Could you share a bit more about what you had in mind?",
-            "Great to hear from you let's find a good time to chat.",
-        ]
+    text = _call_llm(prompt)          # raises on failure → handled by the endpoint
+    return _parse_suggestions(text)
 
 
 # ─── 5. Grammar fix — clean up the user's own typed draft ─────────────────────
@@ -145,12 +158,8 @@ def fix_grammar(text: str) -> str:
         "Return ONLY the corrected message.\n\n"
         f"Message:\n{text}"
     )
-    try:
-        out = _call_llm(prompt).strip()
-        # strip wrapping quotes the model sometimes adds
-        if len(out) >= 2 and out[0] in "\"'" and out[-1] in "\"'":
-            out = out[1:-1].strip()
-        return out or text
-    except Exception as e:
-        print("[grammar] failed:", e)
-        return text  # fall back to the user's original draft
+    out = _call_llm(prompt).strip()   # raises on failure → handled by the endpoint
+    # strip wrapping quotes the model sometimes adds
+    if len(out) >= 2 and out[0] in "\"'" and out[-1] in "\"'":
+        out = out[1:-1].strip()
+    return out or text

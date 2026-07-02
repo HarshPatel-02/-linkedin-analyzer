@@ -116,6 +116,25 @@ function escHtml(str) {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+// Turn a client-side error into a clean user-facing message (hide "Failed to fetch").
+function clientErrorMessage(err) {
+  const m = (err && err.message) || "";
+  if (!m || /failed to fetch|networkerror|load failed|network request failed/i.test(m)) {
+    return "Server error. Please try again later.";
+  }
+  return m;
+}
+
+// Professional error card shown inside a panel body.
+function errorCardHTML(message) {
+  return `
+    <div style="padding:28px 20px;text-align:center;font-family:'Inter',-apple-system,sans-serif;">
+      <div style="width:44px;height:44px;border-radius:50%;background:#fef2f2;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px;font-size:22px;">⚠️</div>
+      <div style="font-size:15px;font-weight:700;color:#111827;margin-bottom:4px;">Something went wrong</div>
+      <div style="font-size:13px;color:#6b7280;line-height:1.5;">${escHtml(message)}</div>
+    </div>`;
+}
+
 function safeUrl(u) {
   try {
     const url = new URL(u, location.href);
@@ -233,13 +252,8 @@ async function handleAnalyzeClick() {
     renderPanel(apiData);
 
   } catch (err) {
-    console.error("[LI-AI] ❌", err);
-    document.getElementById("li-ai-body").innerHTML = `
-      <div style="color:#dc2626;padding:16px;">
-        ❌ <strong>${escHtml(err.message)}</strong><br><br>
-        Make sure the server is running:<br>
-        <code style="font-size:12px;color:#9ca3af;">uvicorn main:app --reload</code>
-      </div>`;
+    console.error("[LI-AI]", err);
+    (document.getElementById("li-ai-body") || {}).innerHTML = errorCardHTML(clientErrorMessage(err));
   }
 }
 
@@ -281,7 +295,10 @@ async function ICPButton() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile_url }),
       });
-      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+      if (!resp.ok) {
+        const b = await resp.json().catch(() => ({}));
+        throw new Error(b.detail || `Server error ${resp.status}`);
+      }
       result = await resp.json();
       await cacheSet(cacheKey, result);
     }
@@ -306,7 +323,7 @@ async function ICPButton() {
     const icpColor = result.icp_score >= 70 ? "#059669" : result.icp_score >= 40 ? "#eab308" : "#dc2626";
     const icpLabel = result.icp_score >= 70 ? "Good Match" : result.icp_score >= 40 ? "Need Nurturing" : "Poor Match";
     const icpSub   = result.icp_score >= 70 ? "This lead aligns well with your ideal customer profile." : result.icp_score >= 40 ? "Build engagement to improve outreach success." : "This lead is outside your ideal customer profile.";
-    document.getElementById("li-icp-body").innerHTML = `
+    (document.getElementById("li-icp-body") || {}).innerHTML = `
       <div style="padding:16px;">
         <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;">
           ${scoreCircle(result.icp_score, 100, icpColor)}
@@ -323,8 +340,7 @@ async function ICPButton() {
         ${rows}
       </div>`;
   } catch (err) {
-    document.getElementById("li-icp-body").innerHTML = `
-      <div style="color:#dc2626;padding:16px;">❌ ${escHtml(err.message)}</div>`;
+    (document.getElementById("li-icp-body") || {}).innerHTML = errorCardHTML(clientErrorMessage(err));
   }
 }
 
@@ -416,7 +432,7 @@ function renderPanel(data) {
   const cleanLabel = score_total >= 70 ? "Ready to Engage" : score_total >= 40 ? "Needs Nurturing" : "Difficult to Engage";
   const actSub     = score_total >= 70 ? "High outreach potential — great time to connect." : score_total >= 40 ? "Moderate potential — consider warming up first." : "Low engagement may not respond well.";
 
-  document.getElementById("li-ai-body").innerHTML = `
+  (document.getElementById("li-ai-body") || {}).innerHTML = `
     <div style="padding:18px;margin-bottom:14px;">
       <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e5e7eb;">
         ${scoreCircle(score_total, 100, scoreColor)}
@@ -595,6 +611,18 @@ function hoverBg(btn) {
   btn.addEventListener("mouseleave", () => { btn.style.background = "transparent"; });
 }
 
+// Small transient message at the bottom of the screen (for grammar fix feedback).
+function showToast(msg) {
+  const t = document.createElement("div");
+  t.textContent = msg;
+  t.style.cssText =
+    "position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;" +
+    "padding:10px 16px;border-radius:8px;font:500 13px/1.3 'Inter',sans-serif;max-width:360px;" +
+    "z-index:100000;box-shadow:0 4px 16px rgba(0,0,0,.3);";
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2800);
+}
+
 function injectSuggestButton() {
   ensureShadowObservers();
   pruneOrphanPanels(); // close panels whose chat was closed/navigated away
@@ -633,23 +661,28 @@ function injectSuggestButton() {
 async function handleGrammarFix(editable, btn) {
   const text = (editable.innerText || "").trim();
   const prev = btn.textContent;
-  if (!text) { btn.textContent = "✍️?"; setTimeout(() => (btn.textContent = prev), 900); return; }
+  if (!text) { showToast("✍️ Type a message first, then click to fix its grammar."); return; }
   btn.disabled = true;
   btn.textContent = "…";
   try {
-    const resp = await fetch(`${API_CHAT_URL}/grammar-fix`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-    if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+    let resp;
+    try {
+      resp = await fetch(`${API_CHAT_URL}/grammar-fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+    } catch (netErr) {
+      showToast("Server error. Please try again later.");
+      return;
+    }
+    if (!resp.ok) {
+      showToast(`Server error ${resp.status}. Check the backend logs.`);
+      return;
+    }
     const data = await resp.json();
-    if (data.text) insertIntoComposer(editable, data.text);
-  } catch (err) {
-    console.error("[grammar]", err);
-    btn.textContent = "✍️!";
-    setTimeout(() => (btn.textContent = prev), 1200);
-    return;
+    if (data.error) showToast("⚠️ " + data.error);         // clear reason
+    else if (data.text) insertIntoComposer(editable, data.text);
   } finally {
     btn.disabled = false;
     if (btn.textContent === "…") btn.textContent = prev;
@@ -777,9 +810,17 @@ function handleSuggestClick(editable, form, btn) {
     listEl.appendChild(d);
   };
 
-  const renderList = (list) => {
+  const renderList = (list, errorMsg) => {
     listEl.innerHTML = "";
-    if (!list || !list.length) { setInfo("No suggestions."); return; }
+    if (errorMsg) {
+      const warn = document.createElement("div");
+      warn.textContent = "⚠️ " + errorMsg;
+      warn.style.cssText =
+        "font-size:12px;color:#92400e;background:#fef3c7;border:1px solid #fde68a;" +
+        "border-radius:8px;padding:8px 10px;margin-bottom:8px;";
+      listEl.appendChild(warn);
+    }
+    if (!list || !list.length) { if (!errorMsg) setInfo("No suggestions."); return; }
     let selected = null;
     const norm = (b) => { b.style.background = "#f9fafb"; b.style.borderColor = "#e5e7eb"; };
     const sel = (b) => { b.style.background = "#dbeafe"; b.style.borderColor = "#0a66c2"; };
@@ -817,26 +858,46 @@ function handleSuggestClick(editable, form, btn) {
   // (suggestions or an error) — never a silent blank.
   async function load(useCache) {
     setInfo("Thinking…");
+
+    // 1) read the conversation from the page
+    let messages, profile, participant, sig, conversation_id;
     try {
-      const messages = scrapeConversation(editable);
-      const profile = getRecipientProfile(editable);
-      const participant = getParticipant(messages) || profile.name;
-      const sig = convoSignature(editable, messages) + "|" + state.tone;
-      if (useCache && suggestCache.has(sig)) { renderList(suggestCache.get(sig)); return; }
-      const conversation_id = getConversationId(editable);
-      const resp = await fetch(`${API_CHAT_URL}/generate-suggestions`, {
+      messages = scrapeConversation(editable);
+      profile = getRecipientProfile(editable);
+      participant = getParticipant(messages) || profile.name;
+      sig = convoSignature(editable, messages) + "|" + state.tone;
+      conversation_id = getConversationId(editable);
+    } catch (e) {
+      setInfo("Couldn't read this conversation. Try reopening the chat.", "#dc2626");
+      return;
+    }
+    if (useCache && suggestCache.has(sig)) { renderList(suggestCache.get(sig)); return; }
+
+    // 2) call the backend — separate "unreachable" from "server responded with error"
+    let resp;
+    try {
+      resp = await fetch(`${API_CHAT_URL}/generate-suggestions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ conversation_id, participant, messages, profile, tone: state.tone, nonce: state.nonce ? String(state.nonce) : "" }),
       });
-      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
-      const data = await resp.json();
-      const list = data.suggestions || [];
-      suggestCache.set(sig, list);
-      renderList(list);
-    } catch (err) {
-      setInfo(`❌ ${err.message} — is the backend running on :8000?`, "#dc2626");
+    } catch (netErr) {
+      setInfo("Server error. Please try again later.", "#dc2626");
+      return;
     }
+    if (!resp.ok) {
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch {}
+      setInfo(`Server error ${resp.status}${detail ? " — " + detail : ""}. Check the backend logs.`, "#dc2626");
+      return;
+    }
+
+    // 3) success — the AI may still report a friendly error in data.error
+    let data;
+    try { data = await resp.json(); } catch { setInfo("Unexpected response from the server.", "#dc2626"); return; }
+    const list = data.suggestions || [];
+    suggestCache.set(sig, list);
+    renderList(list, data.error || "");
   }
 
   paintTones();
