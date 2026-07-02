@@ -112,7 +112,7 @@ def _parse_suggestions(text: str) -> list:
 
     suggestions = suggestions[:3]
     while len(suggestions) < 3:
-        suggestions.append("Thanks for reaching out — I'd be glad to connect and learn more.")
+        suggestions.append("Thanks for reaching out I'd be glad to connect and learn more.")
     return suggestions
 
 
@@ -127,9 +127,9 @@ def generate_suggestions(messages: list, participant: str = "", profile: dict = 
         print("[suggestions] llm call failed:", e)
         # Never break the UI — return safe generic replies.
         return [
-            "Thanks for reaching out — happy to connect!",
+            "Thanks for reaching out happy to connect!",
             "Appreciate the message. Could you share a bit more about what you had in mind?",
-            "Great to hear from you — let's find a good time to chat.",
+            "Great to hear from you let's find a good time to chat.",
         ]
 
 
