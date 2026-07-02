@@ -15,17 +15,23 @@ RELATED_INDUSTRIES = [
     "healthcare", "health",
 ]
 
+# Each role lists BOTH the abbreviation and the spelled-out form, because matching
+# is substring-based ("ceo" is NOT inside "chief executive officer", and vice versa).
 TIER_1_TITLES = [
     "founder", "co-founder", "co founder", "cofounder",
-    "ceo", "owner",     
+    "ceo", "chief executive officer",
+    "owner", "proprietor",
 ]
 
 TIER_2_TITLES = [
-    "cto", "operation head", "medical director",
+    "cto", "chief technology officer",
+    "operation head", "operations head", "head of operations",
+    "medical director",
 ]
 
 TIER_3_TITLES = [
-    "product head", "managing director",
+    "product head", "head of product",
+    "managing director",
 ]
 
 EXACT_COMPANY_SIZE_KEYWORDS = [
@@ -38,20 +44,20 @@ NEARBY_COMPANY_SIZE_KEYWORDS = [
 ]
 
 PRIMARY_GEOGRAPHIES = [
-    "united states", "united states of america", "usa", "u.s.a", "u.s",
-    "australia",
-    "united arab emirates", "uae",
+    "united states", "united states of america", "usa", "u.s.a.", "u.s.a", "u.s.", "u.s",
+    "australia", "aus",
+    "united arab emirates", "uae", "u.a.e",
 ]
 
 PRIMARY_CITY_KEYWORDS = [
-    # USA metros
-    "bay area", "san francisco", "new york", "los angeles", "chicago",
-    "seattle", "boston", "dallas", "atlanta", "denver", "philadelphia",
-    "houston", "austin", "miami", "silicon valley", "washington dc",
+    # USA metros (full + safe short forms; "la" omitted — it matches dallas/atlanta)
+    "bay area", "san francisco", "sf", "new york", "nyc", "los angeles",
+    "chicago", "seattle", "boston", "dallas", "atlanta", "denver", "philadelphia",
+    "houston", "austin", "miami", "silicon valley", "washington dc", "washington d.c.",
     # Australia cities
     "sydney", "melbourne", "brisbane", "perth", "adelaide",
     # UAE cities
-    "dubai", "abu dhabi", "sharjah",
+    "dubai", "dxb", "abu dhabi", "sharjah",
 ]
 
 SECONDARY_GEOGRAPHIES = [
