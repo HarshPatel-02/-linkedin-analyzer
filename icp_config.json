@@ -1,0 +1,36 @@
+{
+  "EXACT_INDUSTRIES": [
+    "Health care",
+    "health tech"
+  ],
+  "RELATED_INDUSTRIES": [
+    "startup in health care"
+  ],
+  "TIER_1_TITLES": [
+    "ceo",
+    "founder"
+  ],
+  "TIER_2_TITLES": [
+    "co founder"
+  ],
+  "TIER_3_TITLES": [
+    "seniour position in compnay"
+  ],
+  "EXACT_COMPANY_SIZE_KEYWORDS": [
+    "11 - 50"
+  ],
+  "NEARBY_COMPANY_SIZE_KEYWORDS": [
+    "51-70"
+  ],
+  "PRIMARY_GEOGRAPHIES": [
+    "INDIA",
+    "US"
+  ],
+  "SECONDARY_GEOGRAPHIES": [
+    "UAE",
+    "UK"
+  ],
+  "ALL_ICP_KEYWORDS": [
+    "health care"
+  ]
+}

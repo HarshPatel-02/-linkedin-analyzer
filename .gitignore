@@ -1,0 +1,11 @@
+__pycache__/
+.venv/
+.venv_broken/
+venv/
+.env
+.vscode/
+*.pyc
+*.zip
+session-notes.md
+.impeccable/
+.claude/
