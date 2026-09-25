@@ -812,7 +812,8 @@ function withLeads(fn) {
 }
 
 // Merge `patch` into this person's lead record (created on first sight).
-function updateLead(url, name, patch) {
+// `done` runs once the record is in storage — the admin push waits for it.
+function updateLead(url, name, patch, done) {
   name = String(name || "").split("\n")[0].trim();
   if (!liLeadSlug(url) && !name) return;
   withLeads((leads, save) => {
@@ -827,7 +828,22 @@ function updateLead(url, name, patch) {
       updatedAt: Date.now(),
     });
     save();
+    if (typeof done === "function") done();
   });
+}
+
+// Send this one person to the LeadAgent admin panel as soon as they are scored.
+// Deliberately silent: the panel runs on localhost and is often off, and a score the
+// user can already see must never turn into an error. Anything missed is picked up by
+// "⇅ Sync to admin" in the toolbar popup, which sends every logged lead.
+function pushLeadToAdmin(url, name) {
+  try {
+    if (!chrome.runtime || !chrome.runtime.id) return;
+    chrome.runtime.sendMessage({ type: "li-admin", action: "push", url, name }, (res) => {
+      void chrome.runtime.lastError;                     // panel off / worker asleep
+      if (res && !res.ok && res.error !== "nothing to push") console.log("[LI-AI] admin push skipped:", res.error);
+    });
+  } catch (e) { /* extension reloaded — the popup's Sync button still has this lead */ }
 }
 
 // Their newest message is new since my last send → they replied, stop the follow-up.
@@ -1258,7 +1274,7 @@ async function calculateActivityScore() {
       company: (data.current_company && data.current_company !== "Not specified") ? data.current_company : (p.current_company || ""),
       activityScore: data.score_total || 0,
       activityLabel: data.score_label || "",
-    });
+    }, () => pushLeadToAdmin(p.profileUrl, data.name || p.name));
     if (currentProfileSlug() !== slug || !document.getElementById("li-ai-body")) return;   // saved; nothing to show here
     renderPanel(data, null, { fresh: true });
   } catch (err) {
@@ -1550,7 +1566,7 @@ async function calculateIcpScore() {
       headline: p.headline || "",
       company,
       icpScore: result.icp_score || 0,
-    });
+    }, () => pushLeadToAdmin(p.profileUrl, p.name));
     if (currentProfileSlug() !== slug || !document.getElementById("li-icp-body")) return;   // saved; nothing to show here
     renderIcpResult(result, kCount, null, { fresh: true });
   } catch (err) {
