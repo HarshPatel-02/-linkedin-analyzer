@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timezone
 from apify_client import ApifyClient
 from models import ProfileData
-from services.scoring_service import time_ago, compute_score, newest_post
+from services.scoring_service import time_ago, compute_score, newest_post, split_own_posts
 
 APIFY_API_TOKEN        = os.getenv("APIFY_API_TOKEN")
 APIFY_ACTOR_ID         = os.getenv("APIFY_ACTOR_ID")
@@ -69,11 +69,16 @@ def run_apify_actor(profile_url: str) -> dict:
 
     raise Exception("No data returned from Apify -> " + " | ".join(errors))
 
-def run_posts_actor(profile_url: str, max_posts: int = 20) -> list:
+def run_posts_actor(profile_url: str, max_posts: int = 20, errors: list | None = None) -> list:
+    """Posts from the profile's activity feed, newest first (the actor sorts by
+    date), limited to the last 90 days. `errors` (when given) collects the reason
+    a fetch came back empty, so the caller can tell "no posts" from "fetch failed"."""
     token    = _env("APIFY_API_TOKEN", APIFY_API_TOKEN)
     actor_id = _env("APIFY_POSTS_ACTOR_ID", APIFY_POSTS_ACTOR_ID)
     if not token or not actor_id:
         print(f"[LI-AI] posts actor skipped: APIFY_API_TOKEN/APIFY_POSTS_ACTOR_ID not set in .env")
+        if errors is not None:
+            errors.append("posts actor skipped: APIFY_API_TOKEN/APIFY_POSTS_ACTOR_ID not set in .env")
         return []
     try:
         from datetime import timedelta
@@ -85,6 +90,10 @@ def run_posts_actor(profile_url: str, max_posts: int = 20) -> list:
             "targetUrls":      [profile_url],
             "maxPosts":        max_posts,
             "postedLimitDate": limit_date,
+            # Reposts stay in: they count as activity. split_own_posts keeps their
+            # text/engagement (the original author's) out of everything else.
+            "includeReposts":    True,
+            "includeQuotePosts": True,
         })
         posts = []
         for item in client.dataset(run["defaultDatasetId"]).iterate_items():
@@ -92,6 +101,8 @@ def run_posts_actor(profile_url: str, max_posts: int = 20) -> list:
         return posts
     except Exception as e:
         print(f"[LI-AI] posts actor {actor_id} failed: {type(e).__name__}: {e}")
+        if errors is not None:
+            errors.append(f"posts actor {actor_id}: {type(e).__name__}: {e}")
         return []
 
 def map_apify_to_profile(data: dict, profile_url: str, posts_data: list) -> ProfileData:
@@ -148,17 +159,14 @@ def map_apify_to_profile(data: dict, profile_url: str, posts_data: list) -> Prof
     else:
         education = data.get("educations_details") or "Not specified"
 
+    # Real skills only \u2014 job titles are not skills (they would inflate Profile Completeness)
     skill_list = data.get("skills") or []
-    if skill_list:
-        skills = " \u2022 ".join(skill_list)
-    else:
-        exp = data.get("experience") or []
-        roles = []
-        for e in exp:
-            if not isinstance(e, dict): continue
-            t, c = e.get("title") or "", e.get("company") or ""
-            roles.append(f"{t} @ {c}" if (t and c) else t)
-        skills = " \u2022 ".join(filter(None, roles)) or "Not specified"
+    names = []
+    for s in skill_list if isinstance(skill_list, list) else []:
+        name = (s.get("name") or s.get("title") or "") if isinstance(s, dict) else str(s or "")
+        if name.strip():
+            names.append(name.strip())
+    skills = " \u2022 ".join(names) or "Not specified"
 
     proj_list = data.get("projects") or []
     if proj_list:
@@ -173,19 +181,36 @@ def map_apify_to_profile(data: dict, profile_url: str, posts_data: list) -> Prof
     else:
         projects = "No projects"
 
-    posts_raw    = data.get("posts") or []
-    act_list     = data.get("activity") or []
-    activity_url = ""
+    posts_raw     = data.get("posts") or []
+    act_list      = data.get("activity") or []
+    activity_url  = ""
+    activity_date = ""
 
     # "Last posted \u2026" must describe the NEWEST dated post across both actors \u2014 the
     # same posts the Recent Activity score is computed from \u2014 never just list[0],
     # which can be an old or featured post ("2 years ago" next to a 20/30 score).
-    newest = newest_post(list(posts_data or []) + [p for p in posts_raw if isinstance(p, dict)])
+    # The feed also holds reposts of OTHER people's posts (the item's author is
+    # the original writer): those may only ever show as "Reposted \u2026", never as
+    # this person's own words or link.
+    all_posts    = list(posts_data or []) + [p for p in posts_raw if isinstance(p, dict)]
+    own, reposts = split_own_posts(all_posts, profile_url)
+    newest = newest_post(own)
+
+    def _post_url(post):
+        return post.get("url") or post.get("linkedinUrl") or post.get("postUrl") or post.get("post_url") or post.get("link") or ""
+
+    newest_repost = newest_post(reposts)
     if newest:
         _, iso, latest = newest
-        snippet      = " ".join(str(latest.get("text") or latest.get("content") or latest.get("title") or "").split())[:80]
-        activity_url = latest.get("url") or latest.get("postUrl") or latest.get("post_url") or latest.get("link") or ""
-        activity     = f"Last posted {time_ago(iso)}" + (f' \u2014 "{snippet}\u2026"' if snippet else "")
+        snippet       = " ".join(str(latest.get("text") or latest.get("content") or latest.get("title") or "").split())[:80]
+        activity_url  = _post_url(latest)
+        activity_date = iso
+        activity      = f"Last posted {time_ago(iso)}" + (f' \u2014 "{snippet}\u2026"' if snippet else "")
+    elif newest_repost:
+        _, iso, latest = newest_repost
+        activity_url  = _post_url(latest)
+        activity_date = iso
+        activity      = f"Reposted someone else's post {time_ago(iso)}"
     elif act_list and isinstance(act_list[0], dict):
         first        = act_list[0]
         interaction  = first.get("interaction") or ""
@@ -197,15 +222,21 @@ def map_apify_to_profile(data: dict, profile_url: str, posts_data: list) -> Prof
     else:
         activity = "No recent activity"
 
-    followers          = int(data.get("followers")          or 0)
-    connections        = int(data.get("connections")        or 0)
-    mutual_connections = int(data.get("mutual_connections") or 0)
+    def _count(value) -> int:   # "1,234" / "500+" / None → int, never a crash
+        try:
+            return int(float(str(value or 0).replace(",", "").rstrip("+").strip() or 0))
+        except (TypeError, ValueError):
+            return 0
+    followers          = _count(data.get("followers"))
+    connections        = _count(data.get("connections"))
+    mutual_connections = _count(data.get("mutual_connections"))
 
     profile = ProfileData(
         avatar=avatar, name=name, country=country, position=position,
         about=about, current_company=current_company, education=education,
         skills=skills, projects=projects, activity=activity,
-        activity_url=activity_url, followers=followers, connections=connections,
+        activity_url=activity_url, activity_date=activity_date,
+        followers=followers, connections=connections,
         mutual_connections=mutual_connections,
         profileUrl=profile_url, timestamp="", experience=experience
     )
