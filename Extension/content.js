@@ -811,6 +811,22 @@ function withLeads(fn) {
   } catch (e) { /* extension reloaded — skip logging */ }
 }
 
+// The profile facts the admin panel scores against (role, About text, country).
+// Without them a synced lead has only a headline and scores near zero there, so
+// they ride along on every lead record. `about` is capped: this is a log, not a copy.
+function leadProfileFields(p, data) {
+  const val = (v) => {
+    const s = String(v == null ? "" : v).trim();
+    return !s || /^(not specified|unknown|no activity data|no recent activity|no projects)$/i.test(s) ? "" : s;
+  };
+  return {
+    position: val((data && data.position) || p.position) || val(p.headline),
+    country: val((data && data.country) || p.country),
+    about: val((data && data.about) || p.about).slice(0, 1200),
+    activity: val((data && data.activity) || p.activity),
+  };
+}
+
 // Merge `patch` into this person's lead record (created on first sight).
 // `done` runs once the record is in storage — the admin push waits for it.
 function updateLead(url, name, patch, done) {
@@ -1269,12 +1285,12 @@ async function calculateActivityScore() {
     await apiFetch("/activity-keywords", collectSignalKeywords());
     const data = await apiFetch("/analyze", payload);
     await saveStoredScore("activity", data, scoreKey);
-    updateLead(p.profileUrl, data.name || p.name, {
+    updateLead(p.profileUrl, data.name || p.name, Object.assign(leadProfileFields(p, data), {
       headline: data.headline || p.headline || "",
       company: (data.current_company && data.current_company !== "Not specified") ? data.current_company : (p.current_company || ""),
       activityScore: data.score_total || 0,
       activityLabel: data.score_label || "",
-    }, () => pushLeadToAdmin(p.profileUrl, data.name || p.name));
+    }), () => pushLeadToAdmin(p.profileUrl, data.name || p.name));
     if (currentProfileSlug() !== slug || !document.getElementById("li-ai-body")) return;   // saved; nothing to show here
     renderPanel(data, null, { fresh: true });
   } catch (err) {
@@ -1562,11 +1578,11 @@ async function calculateIcpScore() {
     });
     const kCount = countKeywords(saved);
     await saveStoredScore("icp", { result, keywordCount: kCount }, scoreKey);
-    updateLead(p.profileUrl, p.name, {
+    updateLead(p.profileUrl, p.name, Object.assign(leadProfileFields(p, null), {
       headline: p.headline || "",
       company,
       icpScore: result.icp_score || 0,
-    }, () => pushLeadToAdmin(p.profileUrl, p.name));
+    }), () => pushLeadToAdmin(p.profileUrl, p.name));
     if (currentProfileSlug() !== slug || !document.getElementById("li-icp-body")) return;   // saved; nothing to show here
     renderIcpResult(result, kCount, null, { fresh: true });
   } catch (err) {
