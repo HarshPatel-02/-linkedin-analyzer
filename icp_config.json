@@ -1,7 +1,6 @@
 {
   "EXACT_INDUSTRIES": [
-    "Health care",
-    "health tech"
+    "Health"
   ],
   "RELATED_INDUSTRIES": [
     "startup in health care"
@@ -32,5 +31,17 @@
   ],
   "ALL_ICP_KEYWORDS": [
     "health care"
-  ]
+  ],
+  "POINTS": {
+    "EXACT_INDUSTRIES": 35,
+    "RELATED_INDUSTRIES": 25,
+    "TIER_1_TITLES": 25,
+    "TIER_2_TITLES": 20,
+    "TIER_3_TITLES": 15,
+    "EXACT_COMPANY_SIZE_KEYWORDS": 15,
+    "NEARBY_COMPANY_SIZE_KEYWORDS": 8,
+    "PRIMARY_GEOGRAPHIES": 10,
+    "SECONDARY_GEOGRAPHIES": 5,
+    "ALL_ICP_KEYWORDS": 15
+  }
 }
