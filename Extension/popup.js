@@ -125,8 +125,12 @@ $("admin-sync").onclick = async () => {
   try {
     const r = await adminMsg("sync");
     if (!r || !r.ok) throw new Error((r && r.error) || "no response");
-    $("admin-status").textContent = "✅ Synced " + r.data.synced + " lead" + (r.data.synced === 1 ? "" : "s") +
-      ' to ICP "' + esc(r.data.icpName) + '" — open the admin to see them.';
+    const d = r.data;
+    $("admin-status").textContent = d.synced
+      ? "✅ Synced " + d.synced + " lead" + (d.synced === 1 ? "" : "s") +
+        ' to ICP "' + esc(d.icpName) + '" — open the admin to see them.'
+      : "⚠️ Nothing synced: all " + (d.received || 0) + " logged lead" + (d.received === 1 ? "" : "s") +
+        " lack a profile link and a name, so they can't be identified.";
   } catch (e) {
     $("admin-status").textContent = "❌ Sync failed: " + esc(e.message);
   } finally {
