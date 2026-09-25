@@ -104,6 +104,37 @@ $("clear-leads").onclick = () => {
   chrome.storage.local.remove(LI_LEADS_KEY, render);
 };
 
+// ─── Admin panel (LeadAgent) connection ───────────────────────────────────────
+const ADMIN_LEADS_URL = "http://localhost:5173/leads";
+const adminMsg = (action) => new Promise((res) => chrome.runtime.sendMessage({ type: "li-admin", action }, res));
+
+async function adminStatus() {
+  const r = await adminMsg("status");
+  if (!r || !r.ok) { $("admin-status").textContent = "⚪ Admin panel not connected (" + esc((r && r.error) || "no response") + ")"; return null; }
+  const d = r.data;
+  const sso = d.ssoConfigured ? (d.ssoConnected ? "SSO: " + (d.ssoName || "connected") : "SSO not connected") : "SSO not configured (dev)";
+  $("admin-status").textContent = "🟢 Connected · " + sso + " · active ICP: " +
+    (d.activeIcp ? d.activeIcp.name : "none") + " · " + d.syncedLeads + " synced";
+  return d;
+}
+
+$("admin-open").onclick = () => openUrl(ADMIN_LEADS_URL);
+$("admin-sync").onclick = async () => {
+  $("admin-sync").disabled = true;
+  $("admin-status").textContent = "Syncing…";
+  try {
+    const r = await adminMsg("sync");
+    if (!r || !r.ok) throw new Error((r && r.error) || "no response");
+    $("admin-status").textContent = "✅ Synced " + r.data.synced + " lead" + (r.data.synced === 1 ? "" : "s") +
+      ' to ICP "' + esc(r.data.icpName) + '" — open the admin to see them.';
+  } catch (e) {
+    $("admin-status").textContent = "❌ Sync failed: " + esc(e.message);
+  } finally {
+    $("admin-sync").disabled = false;
+  }
+};
+document.querySelector('nav [data-tab="leads"]').addEventListener("click", () => { adminStatus(); });
+
 // ─── My pitch (backend: /pitch-config → pitch_config.json) ────────────────────
 // A sleeping Render server can take ~30-50s to answer; don't wait forever.
 async function fetchWithTimeout(url, init, ms) {
