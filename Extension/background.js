@@ -1,6 +1,6 @@
 importScripts("leads.js");
 
-const API_BASE = "http://127.0.0.1:8765";
+const API_BASE = "https://linkedin-analyzer-90ne.onrender.com";
 
 // Alarms can be cleared on browser restart → (re)create on install and startup.
 function startFollowupAlarm() {
@@ -14,13 +14,16 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(startFollowupAlarm);
 
 // ─── Backend proxy ─────────────────────────────────────────────────────────────
-// content.js → {type:"li-api", path, method, body} → local FastAPI server.
+// content.js → {type:"li-api", path, method, body, timeoutMs} → FastAPI backend.
 // The request comes from the extension (host_permissions), not from linkedin.com.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== "li-api") return false;
   (async () => {
+    const timeoutMs = Math.max(5000, Math.min(Number(msg.timeoutMs) || 45000, 170000));
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const init = { method: msg.method || "GET" };
+      const init = { method: msg.method || "GET", signal: ctrl.signal };
       if (msg.body !== undefined) {
         init.headers = { "Content-Type": "application/json" };
         init.body = JSON.stringify(msg.body);
@@ -29,7 +32,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const data = await resp.json().catch(() => ({}));
       sendResponse({ ok: resp.ok, status: resp.status, data });
     } catch (e) {
-      sendResponse({ ok: false, status: 0, data: {}, error: "backend not running at " + API_BASE + " — start uvicorn" });
+      const error = e && e.name === "AbortError"
+        ? `Timed out after ${Math.round(timeoutMs / 1000)}s — the server may be waking up (Render free tier sleeps when idle) or the scrape is slow. Try again.`
+        : "Backend unreachable at " + API_BASE + " — it may be waking up (Render free tier sleeps when idle), wait ~30s and try again";
+      sendResponse({ ok: false, status: 0, data: {}, error });
+    } finally {
+      clearTimeout(timer);
     }
   })();
   return true;   // keep the channel open for the async reply
