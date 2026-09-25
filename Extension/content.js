@@ -882,12 +882,10 @@ function loadAiPrefs() {
 // The tone last picked on any AI surface, so the next note opens on it instead of
 // resetting. Per-message choice still wins: every picker writes back through here.
 // Tone precedence: this composer's own toggle → a toggle made anywhere this
-// session → the saved Setup preference (toolbar popup → My pitch) → casual.
+// session → casual. There is no saved tone setting to fall back to.
 let lastAiTone = "casual";
-let lastAiToneTouched = false;
 const cleanTone = (t) => (t === "pro" ? "pro" : "casual");
-function rememberAiTone(t) { lastAiToneTouched = true; return (lastAiTone = cleanTone(t)); }
-function defaultAiTone(prefs) { return lastAiToneTouched ? lastAiTone : cleanTone(prefs && prefs.aiTone); }
+function rememberAiTone(t) { return (lastAiTone = cleanTone(t)); }
 
 // ─── Click Handler ─────────────────────────────────────────────────────────────
 
@@ -1897,8 +1895,7 @@ async function mountOutreach(section, opts) {
   if (!section) return;
   const key = storeKey("liOutreach:");
   let store = await loadProfileStore("liOutreach:");
-  const prefs = await loadAiPrefs();
-  let tone = store.tone === "pro" || store.tone === "casual" ? store.tone : defaultAiTone(prefs);
+  let tone = store.tone === "pro" || store.tone === "casual" ? store.tone : lastAiTone;
   const bodyEl = section.querySelector(".li-outreach-body");
   const show = (state) => { if (section.isConnected) bodyEl.innerHTML = outreachBodyHTML(state); };
   const paintTools = (busy) => section.querySelectorAll(".li-outreach-tools button").forEach((b) => {
@@ -2793,7 +2790,7 @@ async function toggleAiPopup(editable, spark, opts) {
   box.className = "li-ai-popup";
   box.style.cssText = AI_BOX_CSS;
   // action/draft set = "Your draft" rewrite view; notice = one-off hint line
-  const state = { tone: cleanTone(editable._liTone || defaultAiTone(prefs)), action: "", draft: "", notice: "",
+  const state = { tone: cleanTone(editable._liTone || lastAiTone), action: "", draft: "", notice: "",
                   role: prefs.senderRole || "" };
   const maxChars = invite ? ((editable.maxLength > 0 && editable.maxLength) || 300) : 300;
   // cache: key -> {list} | {error}; pending: keys with a request in flight.
