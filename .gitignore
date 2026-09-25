@@ -8,4 +8,4 @@ venv/
 *.zip
 session-notes.md
 .impeccable/
-.claude/
+.claude
