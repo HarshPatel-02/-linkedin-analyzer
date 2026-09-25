@@ -43,6 +43,46 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;   // keep the channel open for the async reply
 });
 
+// ─── Admin panel (LeadAgent) sync ──────────────────────────────────────────────
+// popup → {type:"li-admin", action:"status"|"sync"} → LeadAgent backend.
+// Runs here (not in the popup) so host_permissions apply and CORS never blocks.
+const ADMIN_API = "http://localhost:8001/api";
+
+async function adminFetch(path, init) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const resp = await fetch(ADMIN_API + path, Object.assign({ signal: ctrl.signal }, init));
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || "admin backend error " + resp.status);
+    return data;
+  } catch (e) {
+    throw new Error(e && e.name === "AbortError" ? "admin backend timed out"
+      : (e.message || "admin backend unreachable — is it running on localhost:8001?"));
+  } finally { clearTimeout(timer); }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "li-admin") return false;
+  (async () => {
+    try {
+      if (msg.action === "status") {
+        sendResponse({ ok: true, data: await adminFetch("/extension/status") });
+      } else if (msg.action === "sync") {
+        const r = await new Promise((res) => chrome.storage.local.get([LI_LEADS_KEY], res));
+        const leads = Object.values(r[LI_LEADS_KEY] || {});
+        if (!leads.length) { sendResponse({ ok: false, error: "No leads logged yet — analyze a profile first." }); return; }
+        sendResponse({ ok: true, data: await adminFetch("/extension/sync", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leads }),
+        }) });
+      } else {
+        sendResponse({ ok: false, error: "unknown admin action" });
+      }
+    } catch (e) { sendResponse({ ok: false, error: e.message }); }
+  })();
+  return true;
+});
+
 // ─── Follow-up badge: number of people due a follow-up ────────────────────────
 function refreshBadge() {
   chrome.storage.local.get([LI_LEADS_KEY, LI_SETTINGS_KEY], (r) => {
