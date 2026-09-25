@@ -1,6 +1,12 @@
 import json
+import math
 import os
+import re
+from fractions import Fraction
 from apify_client import ApifyClient
+
+from services.matching import (normalize, phrase_pattern, first_match, all_matches, parse_size_range,
+                               employee_count_range, expand_location, pts)
 
 APIFY_COMPANY_ACTOR_ID = os.getenv("APIFY_COMPANY_ACTOR_ID")
 
@@ -159,109 +165,169 @@ def save_icp_config(config: dict) -> dict:
 apply_icp_config(get_icp_config())
 
 # ─── Scoring Logic ────────────────────────────────────────────────────────────
+# Whole-word matching (services/matching.py): "cto" never matches "director",
+# "uk" never matches "ukraine", "1-10" never matches inside "501-1000".
 
-def score_industry(text: str) -> tuple:
-    if not text or text == "Not specified":
+# Titles that contain a tier keyword but are not that role ("Product Owner" is not a business owner)
+NEGATIVE_TITLE_PHRASES = [
+    "product owner", "process owner", "data owner", "business process owner",
+    "service owner", "system owner", "content owner", "account owner",
+]
+# A title preceded by these is about someone else or a past/future role:
+# "Assistant to the CEO", "Office of the CEO", "Ex-Founder", "Aspiring founder"
+_TITLE_CONTEXT_REJECT = re.compile(
+    r"(?:(?<![a-z0-9])(?:executive\s+assistant|assistant|ea|pa|secretary|advisor|adviser|consultant|"
+    r"reporting|reports|staff)\s+to(?:\s+the)?"
+    r"|(?<![a-z0-9])to(?:\s+the)?"
+    r"|(?<![a-z0-9])office\s+of(?:\s+the)?"
+    r"|(?<![a-z0-9])(?:ex|former|formerly|aspiring|future|previous|prev))[\s\-.:]*$"
+)
+
+
+def _clean_text(value) -> str:
+    s = str(value or "").strip()
+    return "" if s.lower() in ("not specified", "unknown", "none") else s
+
+
+def _reject_title_context(norm: str, match) -> bool:
+    return bool(_TITLE_CONTEXT_REJECT.search(norm[:match.start()]))
+
+
+def _strip_negative_titles(text: str) -> str:
+    norm = normalize(text)
+    for phrase in NEGATIVE_TITLE_PHRASES:
+        pat = phrase_pattern(phrase, True)
+        if pat:
+            norm = pat.sub(" ", norm)
+    return norm
+
+
+def _tier_title(text: str):
+    """(points, tier, keyword) for the best title tier in text, or None."""
+    norm = _strip_negative_titles(text)
+    if not norm.strip():
+        return None
+    for key, tier in (("TIER_1_TITLES", 1), ("TIER_2_TITLES", 2), ("TIER_3_TITLES", 3)):
+        kw = first_match(globals()[key], norm, plural=False, reject=_reject_title_context)
+        if kw:
+            return ICP_POINTS[key], tier, kw
+    return None
+
+
+def score_industry(text: str, industry: str = "") -> tuple:
+    industry, text = _clean_text(industry), _clean_text(text)
+    if not industry and not text:
         return 0, "No data"
-    text_lower = text.lower()
-    for kw in EXACT_INDUSTRIES:
-        if kw.lower() in text_lower:
+    for source in [s for s in (industry, text) if s]:
+        kw = first_match(EXACT_INDUSTRIES, source)
+        if kw:
             return ICP_POINTS["EXACT_INDUSTRIES"], f"Exact match ({kw})"
-    for kw in RELATED_INDUSTRIES:
-        if kw.lower() in text_lower:
+        kw = first_match(RELATED_INDUSTRIES, source)
+        if kw:
             return ICP_POINTS["RELATED_INDUSTRIES"], f"Related ({kw})"
     return 0, "Other"
 
-def score_job_title(position: str) -> tuple:
-    if not position or position == "Not specified":
+
+def score_job_title(position: str, headline: str = "") -> tuple:
+    position, headline = _clean_text(position), _clean_text(headline)
+    if not position and not headline:
         return 0, "No data"
-    pos_lower = position.lower()
-    for kw in TIER_1_TITLES:
-        if kw.lower() in pos_lower:
-            return ICP_POINTS["TIER_1_TITLES"], f"Tier 1 ({kw})"
-    for kw in TIER_2_TITLES:
-        if kw.lower() in pos_lower:
-            return ICP_POINTS["TIER_2_TITLES"], f"Tier 2 ({kw})"
-    for kw in TIER_3_TITLES:
-        if kw.lower() in pos_lower:
-            return ICP_POINTS["TIER_3_TITLES"], f"Tier 3 ({kw})"
+    hit = _tier_title(position) if position else None
+    source = ""
+    if not hit and headline and normalize(headline) != normalize(position):
+        hit = _tier_title(headline)
+        source = " — from headline"
+    if hit:
+        points, tier, kw = hit
+        return points, f"Tier {tier} ({kw}){source}"
     return 0, "Other"
 
-def score_company_size(text: str) -> tuple:
-    if not text or text == "Not specified":
+
+def _size_hit(keywords, text: str, rng) -> str:
+    """First keyword in the list that fits the head count (or appears in text)."""
+    mid = None
+    if rng:
+        lo, hi = rng
+        mid = lo if hi == math.inf else (lo + hi) / 2
+    for kw in keywords:
+        kw_range = parse_size_range(kw)
+        if kw_range:
+            if mid is not None:
+                if kw_range[0] <= mid <= kw_range[1]:
+                    return kw
+            elif text and first_match([kw], text, plural=False):
+                return kw
+        else:
+            if text and first_match([kw], text):
+                return kw
+    return ""
+
+
+def score_company_size(text: str, emp_count=None) -> tuple:
+    text = _clean_text(text)
+    rng = employee_count_range(emp_count)
+    if rng is None and not text:
         return 0, "No data"
-    text_lower = text.lower()
-    for kw in EXACT_COMPANY_SIZE_KEYWORDS:
-        if kw.lower() in text_lower:
-            return ICP_POINTS["EXACT_COMPANY_SIZE_KEYWORDS"], f"Exact ({kw})"
-    for kw in NEARBY_COMPANY_SIZE_KEYWORDS:
-        if kw.lower() in text_lower:
-            return ICP_POINTS["NEARBY_COMPANY_SIZE_KEYWORDS"], f"Nearby ({kw})"
+    kw = _size_hit(EXACT_COMPANY_SIZE_KEYWORDS, text, rng)
+    if not kw and rng and rng == (1, 1):
+        # A one-person company is "self-employed" / "freelance" whatever the wording
+        kw = next((k for k in EXACT_COMPANY_SIZE_KEYWORDS if not parse_size_range(k)), "")
+    if kw:
+        return ICP_POINTS["EXACT_COMPANY_SIZE_KEYWORDS"], f"Exact ({kw})"
+    kw = _size_hit(NEARBY_COMPANY_SIZE_KEYWORDS, text, rng)
+    if kw:
+        return ICP_POINTS["NEARBY_COMPANY_SIZE_KEYWORDS"], f"Nearby ({kw})"
     return 0, "Other"
+
 
 def score_geography(country: str) -> tuple:
-    if not country or country == "Not specified":
+    country = _clean_text(country)
+    if not country:
         return 0, "No data"
-    country_lower = country.lower()
-    for g in PRIMARY_GEOGRAPHIES:
-        g = g.lower()
-        if g in country_lower or country_lower in g:
-            return ICP_POINTS["PRIMARY_GEOGRAPHIES"], f"Primary ({country})"
-    for g in SECONDARY_GEOGRAPHIES:
-        g = g.lower()
-        if g in country_lower or country_lower in g:
-            return ICP_POINTS["SECONDARY_GEOGRAPHIES"], f"Secondary ({country})"
+    text = expand_location(country)
+    kw = first_match(PRIMARY_GEOGRAPHIES, text, plural=False)
+    if kw:
+        return ICP_POINTS["PRIMARY_GEOGRAPHIES"], f"Primary ({kw})"
+    kw = first_match(SECONDARY_GEOGRAPHIES, text, plural=False)
+    if kw:
+        return ICP_POINTS["SECONDARY_GEOGRAPHIES"], f"Secondary ({kw})"
     return 0, "Other"
+
 
 def score_keywords(text: str) -> tuple:
-    if not text or text == "Not specified":
+    text = _clean_text(text)
+    if not text:
         return 0, "No data"
-    text_lower = text.lower()
-    matches = 0
-    matched = []
-    for kw in ALL_ICP_KEYWORDS:
-        if kw.lower() in text_lower:
-            matches += 1
-            if kw not in matched:
-                matched.append(kw)
+    matched = all_matches(ALL_ICP_KEYWORDS, text)
+    n = len(matched)
     full = ICP_POINTS["ALL_ICP_KEYWORDS"]   # 5+ matches = full, 3+ = two thirds, 1+ = one third
-    if matches >= 5:
-        return full, f"{matches} matches: {', '.join(matched[:3])}..."
-    elif matches >= 3:
-        return int(round(full * 2 / 3)), f"{matches} matches: {', '.join(matched[:3])}"
-    elif matches >= 1:
-        return int(round(full / 3)), f"1 match: {matched[0]}"
-    return 0, "Other"
+    if n == 0:
+        return 0, "Other"
+    shown = ", ".join(matched[:3]) + ("…" if n > 3 else "")
+    reason = f"1 match: {matched[0]}" if n == 1 else f"{n} matches: {shown}"
+    if n >= 5:
+        return full, reason
+    if n >= 3:
+        return pts(full, Fraction(2, 3)), reason
+    return pts(full, Fraction(1, 3)), reason
 
-def _emp_to_range(emp_count) -> str:
-    """Convert employee count number to range string for keyword matching."""
-    try:
-        n = int(emp_count)
-    except (ValueError, TypeError):
-        return str(emp_count) if emp_count else ""
-    if n == 1: return "self-employed"
-    if n <= 10: return "1-10"
-    if n <= 50: return "11-50"
-    if n <= 200: return "51-200"
-    if n <= 500: return "201-500"
-    if n <= 1000: return "501-1000"
-    if n <= 5000: return "1001-5000"
-    return "5000+"
 
 def calculate_icp(profile: dict) -> dict:
-    position  = profile.get("position", "")
-    country   = profile.get("country", "")
-    company   = profile.get("current_company_name") or profile.get("current_company", "")
-    about     = profile.get("about", "")
-    emp_count = profile.get("current_company_employee_count", "")
-    industry  = profile.get("industry", "")
-    
-    search_text = f"{about} {company} {position} {industry}"
-    size_text   = f"{company} {about} {_emp_to_range(emp_count)}"
+    get = lambda key: _clean_text(profile.get(key))
+    position  = get("position")
+    headline  = get("headline")
+    country   = get("country")
+    about     = get("about")
+    industry  = get("industry")
+    company   = get("current_company_name") or get("current_company")
+    emp_count = profile.get("current_company_employee_count")
 
-    ind_score, ind_reason      = score_industry(search_text)
-    title_score, title_reason  = score_job_title(position)
-    size_score, size_reason    = score_company_size(size_text)
+    search_text = " ".join(s for s in (about, company, position, headline, industry) if s)
+    size_text   = " ".join(s for s in (company, about) if s)
+
+    ind_score, ind_reason      = score_industry(search_text, industry)
+    title_score, title_reason  = score_job_title(position, headline)
+    size_score, size_reason    = score_company_size(size_text, emp_count)
     geo_score, geo_reason      = score_geography(country)
     kw_score, kw_reason        = score_keywords(search_text)
 
@@ -273,23 +339,28 @@ def calculate_icp(profile: dict) -> dict:
         "Geography Match":    max(P["PRIMARY_GEOGRAPHIES"], P["SECONDARY_GEOGRAPHIES"]),
         "Profile Keywords":   P["ALL_ICP_KEYWORDS"],
     }
+    breakdown = {
+        "Industry Match":     {"score": ind_score,   "max": maxes["Industry Match"],     "reason": ind_reason},
+        "Job Title Match":    {"score": title_score, "max": maxes["Job Title Match"],    "reason": title_reason},
+        "Company Size Match": {"score": size_score,  "max": maxes["Company Size Match"], "reason": size_reason},
+        "Geography Match":    {"score": geo_score,   "max": maxes["Geography Match"],    "reason": geo_reason},
+        "Profile Keywords":   {"score": kw_score,    "max": maxes["Profile Keywords"],   "reason": kw_reason},
+    }
     raw_total = ind_score + title_score + size_score + geo_score + kw_score
     max_total = sum(maxes.values())
     # Shown out of 100 whatever the points add up to (the defaults total 100)
-    total = int(round(raw_total * 100 / max_total)) if max_total else 0
+    total = pts(100, Fraction(raw_total, max_total)) if max_total else 0
+    missing = [cat for cat, row in breakdown.items() if row["reason"] == "No data"]
 
     return {
         "icp_score": total,
         "score_raw": raw_total,
         "score_max": max_total,
-        "breakdown": {
-            "Industry Match":       {"score": ind_score,   "max": maxes["Industry Match"],     "reason": ind_reason},
-            "Job Title Match":      {"score": title_score, "max": maxes["Job Title Match"],    "reason": title_reason},
-            "Company Size Match":   {"score": size_score,  "max": maxes["Company Size Match"], "reason": size_reason},
-            "Geography Match":      {"score": geo_score,   "max": maxes["Geography Match"],    "reason": geo_reason},
-            "Profile Keywords":     {"score": kw_score,    "max": maxes["Profile Keywords"],   "reason": kw_reason},
-        },
+        "breakdown": breakdown,
+        "missing":   missing,
+        "coverage":  {"with_data": len(breakdown) - len(missing), "total": len(breakdown)},
     }
+
 
 def run_company_actor(profile_url: str) -> dict:
     try:
@@ -308,8 +379,10 @@ def run_company_actor(profile_url: str) -> dict:
         for item in client.dataset(run["defaultDatasetId"]).iterate_items():
             # Map actor field names → standardized keys
             emp_count = item.get("current_company_employee_count")
-            if emp_count is not None:
-                emp_count = int(emp_count)
+            try:
+                emp_count = int(emp_count) if emp_count is not None else None
+            except (TypeError, ValueError):
+                pass   # a range like "11-50" — employee_count_range() reads it as is
             return {
                 "headline": item.get("headline", ""),
                 "about": item.get("about", ""),
