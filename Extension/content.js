@@ -20,281 +20,289 @@ function newestActivityText(text) {
   return `Last active ${best.n} ${best.unit}${best.n === 1 ? "" : "s"} ago`;
 }
 
+// ─── Scrape helpers ────────────────────────────────────────────────────────────
+const cleanLine = (s) => String(s || "").replace(/\s+/g, " ").trim();
+const BLOCK_TAG_RE = /^(DIV|P|LI|UL|OL|SECTION|ARTICLE|HEADER|FOOTER|H[1-6]|TR|TABLE|DL|DT|DD|BLOCKQUOTE|FIGURE|FIGCAPTION|MAIN|ASIDE|NAV)$/;
+const SKIP_TAG_RE = /^(BUTTON|SVG|SCRIPT|STYLE|NOSCRIPT|TEMPLATE|IMG|INPUT|TEXTAREA|SELECT)$/;
+const DATE_RANGE_RE = /\b(19|20)\d{2}\b|\bpresent\b/i;
+const UI_LINE_RE = /^(about|activity|message|messaging|more|connect|follow|following|pending|contact info|open to|add profile section|enhance profile|resources|home|my network|jobs|notifications?|search|for business|linkedin|show all\b.*|see (more|all)\b.*|…\s*see more)$/i;
+const COUNT_LINE_RE = /\b[\d,.]+\+?\s*(connections?|followers?)\b|\bmutual connections?\b/i;
+const LOCATION_WORD_RE = /\b(area|region|metropolitan|greater|remote|india|united states|usa|uk|united kingdom|canada|australia|germany|singapore|uae|united arab emirates|dubai|france|netherlands|ireland|new zealand|south africa|nigeria|kenya|pakistan|bangladesh|philippines|indonesia|malaysia|japan|brazil|mexico|spain|italy|sweden|switzerland)\b/i;
+const OUR_UI_SEL = "#li-ai-panel, #li-icp-panel";
+
+// Visible text of `el`, one entry per line. LinkedIn prints every string twice —
+// a visible span[aria-hidden="true"] plus a .visually-hidden copy for screen
+// readers — so each visible span becomes one line and the copies are skipped,
+// along with buttons, icons and closed menus.
+function visibleLines(el, skipSubLists) {
+  if (!el) return [];
+  const parts = [];
+  const walk = (node) => {
+    if (node.nodeType === 3) { parts.push(node.nodeValue); return; }
+    if (node.nodeType !== 1) return;
+    const tag = String(node.tagName).toUpperCase();
+    if (SKIP_TAG_RE.test(tag) || node.hidden) return;
+    const cls = typeof node.className === "string" ? node.className : "";
+    if (/\bvisually-hidden\b/.test(cls)) return;
+    if (node.getAttribute("aria-hidden") === "true") {
+      if (tag === "SPAN") parts.push("\n", spanText(node), "\n");
+      return;
+    }
+    if (skipSubLists && node !== el && (tag === "UL" || tag === "OL")) return;
+    if (tag === "BR") { parts.push("\n"); return; }
+    const block = BLOCK_TAG_RE.test(tag);
+    if (block) parts.push("\n");
+    for (const c of node.childNodes) walk(c);
+    if (block) parts.push("\n");
+  };
+  try { walk(el); } catch (e) { return []; }
+  const lines = parts.join("").split("\n").map(cleanLine).filter((l) => l && !/^[·•|,\-–—…]+$/.test(l));
+  return lines.filter((l, i) => l !== lines[i - 1]);
+}
+
+// Text of one visible span; <br> and block children still break the line, so
+// "Services<br>Remote monitoring" never turns into "ServicesRemote monitoring".
+function spanText(span) {
+  let out = "";
+  for (const c of span.childNodes) {
+    if (c.nodeType === 3) out += c.nodeValue;
+    else if (c.nodeType === 1) {
+      const tag = String(c.tagName).toUpperCase();
+      if (tag === "BR") out += "\n";
+      else if (!SKIP_TAG_RE.test(tag)) {
+        const inner = spanText(c);
+        out += BLOCK_TAG_RE.test(tag) ? "\n" + inner + "\n" : inner;
+      }
+    }
+  }
+  return out;
+}
+
+function sectionHeading(sec) {
+  const h = sec.querySelector("h2, h3");
+  return h ? (visibleLines(h)[0] || "").toLowerCase() : "";
+}
+
+// A profile card by LinkedIn's anchor id (#about, #experience …) or, when the
+// markup changes, by its heading text.
+function findSection(title, anchorId) {
+  const anchor = anchorId ? document.getElementById(anchorId) : null;
+  if (anchor && !anchor.closest(OUR_UI_SEL)) {
+    const sec = anchor.closest("section") || anchor.parentElement;
+    if (sec) return sec;
+  }
+  const want = title.toLowerCase();
+  for (const sec of (document.querySelector("main") || document).querySelectorAll("section")) {
+    if (sec.closest(OUR_UI_SEL) || sec.closest("aside")) continue;
+    if (sectionHeading(sec) === want) return sec;
+  }
+  return null;
+}
+
+// Top-level entries of a card; nested lists hold grouped roles or skill details.
+function sectionEntries(sec) {
+  if (!sec) return [];
+  return [...sec.querySelectorAll("li")].filter((li) => {
+    const outer = li.parentElement && li.parentElement.closest("li");
+    return !outer || !sec.contains(outer);
+  });
+}
+
+function firstLines(sec, max, maxLen) {
+  const out = [];
+  for (const li of sectionEntries(sec)) {
+    const t = (visibleLines(li, true).filter((l) => !UI_LINE_RE.test(l))[0]) || "";
+    if (t.length > 1 && t.length < (maxLen || 200) && !out.includes(t)) out.push(t);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+// [{title, company}] newest first. Grouped entries (one company, several roles)
+// list the company first and the roles in a nested list.
+function parseExperience(sec) {
+  const entries = [];
+  for (const li of sectionEntries(sec)) {
+    const lines = visibleLines(li, true).filter((l) => !UI_LINE_RE.test(l));
+    if (!lines.length) continue;
+    const roles = [...li.querySelectorAll("li")].filter((x) => x !== li)
+      .map((x) => visibleLines(x, true)).filter((ls) => ls.length && DATE_RANGE_RE.test(ls.join(" ")));
+    let title = "", company = "";
+    if (roles.length && !DATE_RANGE_RE.test(lines.slice(0, 3).join(" "))) {
+      company = lines[0];
+      title = roles[0][0];
+    } else {
+      title = lines[0];
+      const second = lines[1] || "";
+      company = second && !DATE_RANGE_RE.test(second) ? second.split(" · ")[0].trim() : "";
+    }
+    if (title && !company && / at /i.test(title)) {
+      const parts = title.split(/ at /i);
+      company = parts.pop().trim();
+      title = parts.join(" at ").trim();
+    }
+    if (title.length > 1) entries.push({ title, company });
+  }
+  return entries;
+}
+
+function currentCompanyFromTopCard(topCard) {
+  try {
+    const el = topCard.querySelector('[aria-label^="Current company" i]');
+    const m = el && /current company:\s*(.+?)(?:\.\s*click\b.*)?$/i.exec(el.getAttribute("aria-label") || "");
+    return m ? cleanLine(m[1]) : "";
+  } catch (e) { return ""; }
+}
+
+function headlineOK(t, name) {
+  return !!t && t.length > 2 && t.length < 220 && t !== name &&
+    !UI_LINE_RE.test(t) && !COUNT_LINE_RE.test(t) && !/notification/i.test(t);
+}
+
+function scrapeHeadline(topCard, mainEl, nameEl, name) {
+  const after = (el) => !nameEl || !!(nameEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const sel = '[class*="text-body-medium"], [data-generated-suggestion-target], [class*="headline"]';
+  for (const scope of [topCard, mainEl]) {
+    for (const el of scope.querySelectorAll(sel)) {
+      if (!after(el) || el.closest(OUR_UI_SEL + ", aside, button")) continue;
+      const t = visibleLines(el)[0] || "";
+      if (headlineOK(t, name)) return t;
+    }
+  }
+  // Page title: "Name - Headline | LinkedIn" or "Name | Headline | LinkedIn"
+  const title = document.title || "";
+  const parts = title.split("|").map(cleanLine).filter(Boolean);
+  let t = parts.length >= 3 && /linkedin/i.test(parts[parts.length - 1]) ? parts.slice(1, -1).join(", ") : "";
+  if (!t) { const m = title.match(/\s[—-]\s(.+?)\s*\|\s*LinkedIn/i); t = m ? cleanLine(m[1]) : ""; }
+  return headlineOK(t, name) ? t : "";
+}
+
+// Redesigned top cards without the usual classes: the first plain line under the name.
+function headlineFromLines(topCard, name, location) {
+  const lines = visibleLines(topCard);
+  const i = lines.findIndex((l) => name && l.startsWith(name));
+  for (const l of lines.slice(i + 1, i + 7)) {
+    if (/^(he|she|they)\s*\/\s*(him|her|them)$|^·?\s*(1st|2nd|3rd\+?)$|^(premium|verified)$/i.test(l)) continue;
+    if (l === location) continue;
+    if (headlineOK(l, name)) return l;
+  }
+  return "";
+}
+
+function scrapeLocation(topCard, headline) {
+  // Some layouts print the "Contact info" link on the same line as the location
+  const strip = (t) => cleanLine(String(t || "").replace(/\s*[·•]?\s*contact info\s*$/i, ""));
+  const ok = (t) => !!t && t.length > 2 && t.length < 100 && t !== headline &&
+    !COUNT_LINE_RE.test(t) && !UI_LINE_RE.test(t) && !/contact info|[|@]/i.test(t) &&
+    (/,/.test(t) || LOCATION_WORD_RE.test(t));
+  const smalls = [...topCard.querySelectorAll('[class*="text-body-small"]')]
+    .filter((el) => !el.closest("button, a, " + OUR_UI_SEL));
+  const ci = topCard.querySelector('#top-card-text-details-contact-info, a[href*="contact-info"]');
+  const near = ci ? smalls.filter((el) => el.parentElement && el.parentElement.contains(ci)) : [];
+  for (const el of [...near, ...smalls]) {
+    const t = strip(visibleLines(el)[0]);
+    if (ok(t)) return t;
+  }
+  const lines = visibleLines(topCard).map(strip);
+  const start = headline ? lines.indexOf(headline) + 1 : 0;
+  return lines.slice(start, start + 8).find(ok) || "";
+}
+
+function parseMutualText(txt) {
+  const num = (s) => parseInt(String(s || "").replace(/,/g, ""), 10) || 0;
+  let m;
+  if ((m = txt.match(/and\s+([\d,]+)\s+others?\s+mutual/i))) {
+    const named = (txt.split(/\s+and\s+[\d,]+\s+others?/i)[0] || "").split("\n").pop();
+    return named.split(",").filter((s) => s.trim()).length + num(m[1]);
+  }
+  if ((m = txt.match(/(?:^|\n)\s*([^\n]+?)\s+are\s+mutual\s+connections?/i))) {
+    return m[1].split(/,|\band\b/).filter((s) => s.trim()).length;
+  }
+  if (/\bis\s+a\s+mutual\s+connection/i.test(txt)) return 1;
+  if ((m = txt.match(/([\d,]+)\s+mutual\s+connections?/i))) return num(m[1]);
+  return 0;
+}
+
+// Only the top card counts: the sidebar ("People also viewed") shows OTHER
+// people's mutual connections.
+function scrapeMutualConnections(topCard) {
+  for (const el of topCard.querySelectorAll("a, span, p, li, div, button")) {
+    if (el.closest("aside, " + OUR_UI_SEL)) continue;
+    const txt = (el.innerText || el.textContent || "").trim();
+    if (!txt || txt.length > 200 || !/mutual/i.test(txt)) continue;
+    const n = parseMutualText(txt);
+    if (n) return n;
+  }
+  return 0;
+}
+
+// The profile owner's photo. Never the viewer's own nav avatar, a sidebar
+// thumbnail or the mutual-connection face pile, so a profile without a photo
+// stays without one.
+function scrapeAvatar(topCard) {
+  let best = "", bestSize = -1;
+  for (const img of topCard.querySelectorAll('img[src*="profile-displayphoto"]')) {
+    if (img.closest("aside, header, nav, #global-nav, " + OUR_UI_SEL)) continue;
+    if (img.closest('a[href*="/search/results"], [class*="mutual"], [class*="facepile"], [class*="face-pile"]')) continue;
+    const link = img.closest("a");
+    if (link && /mutual/i.test(link.textContent || "")) continue;
+    const size = (img.naturalWidth || img.width || 0) * (img.naturalHeight || img.height || 0);
+    if (size > bestSize) { best = img.src; bestSize = size; }
+  }
+  return best;
+}
+
 function scrapeProfile() {
   const result = {
     avatar: "", name: "", position: "", headline: "", country: "",
     about: "", current_company: "", education: "", experience: "",
     skills: "", projects: "", activity: "",
     mutual_connections: 0,
-    profileUrl: window.location.href.split("?")[0]
+    profileUrl: liProfileUrl(location.href) || location.href.split("?")[0],
   };
 
-  // Mutual connections — LinkedIn renders as: "Name, Name and X other mutual connections"
-  (function scrapeMutuals() {
-    const parseNum = (str) => parseInt((str || "").replace(/,/g, ""), 10);
-
-    // ── Strategy 1: match LinkedIn's exact format ─────────────────────────────
-    // e.g. "Aayushi, Poonam and 8 other mutual connections"  → total = named + X
-    // e.g. "Aayushi and 1 other mutual connection"
-    // e.g. "Aayushi and Poonam are mutual connections"        → count named names
-    // e.g. "5 mutual connections"                             → plain number
-    const allEls = document.querySelectorAll("button, a, span, div, p, li");
-    for (const el of allEls) {
-      const txt = (el.innerText || el.textContent || "").trim();
-      if (!txt || txt.length > 200) continue;
-      if (!/mutual/i.test(txt)) continue;
-
-      // "Aayushi, Poonam and 8 other mutual connections"
-      const mOther = txt.match(/and\s+([\d,]+)\s+other\s+mutual/i);
-      if (mOther) {
-        // Count named people before "and X other": split on ", " and "and X other"
-        const namedPart = txt.split(/\s+and\s+[\d,]+\s+other/i)[0] || "";
-        const namedCount = namedPart.split(",").filter(s => s.trim().length > 0).length;
-        result.mutual_connections = namedCount + parseNum(mOther[1]);
-        return;
-      }
-
-      // "Aayushi and Poonam are mutual connections" — only named, no number
-      const mAre = txt.match(/^(.+?)\s+are\s+mutual\s+connection/i);
-      if (mAre) {
-        const names = mAre[1].split(/,|\band\b/).filter(s => s.trim().length > 0);
-        result.mutual_connections = names.length;
-        return;
-      }
-
-      // "RAJVI is a mutual connection" — single named person, no number
-      const mIs = txt.match(/^(.+?)\s+is\s+a\s+mutual\s+connection/i);
-      if (mIs) {
-        result.mutual_connections = 1;
-        return;
-      }
-
-      // "5 mutual connections" — plain number
-      const mPlain = txt.match(/^([\d,]+)\s+mutual/i);
-      if (mPlain) {
-        result.mutual_connections = parseNum(mPlain[1]);
-        return;
-      }
-    }
-
-    // ── Strategy 2: raw HTML scan ─────────────────────────────────────────────
-    const html = document.documentElement.outerHTML;
-    const m = html.match(/and\s+([\d,]+)\s+other\s+mutual/i)
-           || html.match(/"mutualConnectionsCount"\s*:\s*(\d+)/i)
-           || html.match(/"mutualConnection"\s*:\s*(\d+)/i)
-           || html.match(/"mutualCount"\s*:\s*(\d+)/i)
-           || html.match(/(\d+)\s+mutual\s+connection/i)
-           || html.match(/>(\d+)\s+mutual/i)
-           || html.match(/\bis\s+a\s+mutual\s+connection\b/i);
-    if (m) {
-      result.mutual_connections = parseNum(m[1]);
-      // "is a mutual connection" pattern has no number — count is 1
-      if (isNaN(result.mutual_connections) && /is a mutual connection/i.test(m[0])) {
-        result.mutual_connections = 1;
-      }
-      return;
-    }
-
-    // ── Strategy 3: body innerText scan (resilient to text changes) ──────────
-    const bodyText = document.body.innerText;
-    // Find all lines containing "mutual" in the body text
-    for (const line of bodyText.split("\n")) {
-      if (!/mutual/i.test(line)) continue;
-      // Try all patterns on this line
-      let match;
-      // "and 8 other mutual connections" → number
-      if (match = line.match(/and\s+([\d,]+)\s+other\s+mutual/i)) {
-        const namedPart = line.split(/\s+and\s+[\d,]+\s+other/i)[0] || "";
-        const namedCount = namedPart.split(",").filter(s => s.trim().length > 0).length;
-        result.mutual_connections = namedCount + parseNum(match[1]);
-        return;
-      }
-      // "5 mutual connections" → number
-      if (match = line.match(/(\d+)\s+mutual\s+connection/i)) {
-        result.mutual_connections = parseNum(match[1]);
-        return;
-      }
-      // "X and Y are mutual connections" → count names
-      if (match = line.match(/^(.+?)\s+are\s+mutual\s+connection/i)) {
-        const names = match[1].split(/,|\band\b/).filter(s => s.trim().length > 0);
-        result.mutual_connections = names.length;
-        return;
-      }
-      // "X is a mutual connection" → 1
-      if (match = line.match(/\bis\s+a\s+mutual\s+connection\b/i)) {
-        result.mutual_connections = 1;
-        return;
-      }
-      // Fallback: any line mentioning "mutual connection" → assume at least 1
-      if (/\bmutual\s+connection\b/i.test(line)) {
-        result.mutual_connections = 1;
-        return;
-      }
-    }
-  })();
-
-  // Avatar — pick the largest profile-displayphoto (owner's photo, not a mutual connection's thumbnail)
-  let bestAvatar = "", bestSize = 0;
-  for (const img of document.querySelectorAll("img")) {
-    if (!(img.src || "").includes("profile-displayphoto")) continue;
-    const size = (img.naturalWidth || img.width || 0) * (img.naturalHeight || img.height || 0);
-    if (size > bestSize) { bestSize = size; bestAvatar = img.src; }
-  }
-  // Fallback: if sizes are all 0 (not yet loaded), take the first one inside the top profile section
-  if (!bestAvatar) {
-    const topImg = document.querySelector("main section img[src*='profile-displayphoto']");
-    bestAvatar = topImg ? topImg.src : "";
-  }
-  result.avatar = bestAvatar;
-
-  const mainEl = document.querySelector("main") || document;
+  const mainEl = document.querySelector("main") || document.body;
   const nameEl = mainEl.querySelector("h1") || document.querySelector("h1");
+  const topCard = topCardSection() || mainEl;
+
   if (nameEl) {
-    result.name = (nameEl.innerText || nameEl.textContent || "").trim()
-      .replace(/\s*\([^)]*\)\s*$/g, "").trim() || "Unknown";
+    const raw = visibleLines(nameEl)[0] || cleanLine(nameEl.textContent);
+    result.name = raw.replace(/\s*\([^)]*\)\s*$/g, "").trim() || "Unknown";
   }
 
-  // ── Headline: the tagline under the name (kept behind the scenes for scoring) ──
-  const blocked = /notification|connection|follower|about|activity|message|invitation|search|for business/i;
-  const rawHeadline = txt => {
-    const t = (txt || "").split("\n")[0].trim();
-    if (t.length <= 2 || t.length >= 200) return "";
-    if (blocked.test(t)) return "";
-    if (result.name && t === result.name) return "";
-    if (/^linkedin$/i.test(t)) return "";
-    return t;
-  };
+  result.mutual_connections = scrapeMutualConnections(topCard);
+  result.avatar = scrapeAvatar(topCard);
+  result.headline = scrapeHeadline(topCard, mainEl, nameEl, result.name);
+  result.country = scrapeLocation(topCard, result.headline);
+  if (!result.headline) result.headline = headlineFromLines(topCard, result.name, result.country);
 
-  // Headline sits right under the name in the intro card:
-  // take the first valid line that appears AFTER the name in the DOM
-  if (nameEl) {
-    const cands = [...mainEl.querySelectorAll(
-      '[class*="text-body-medium"], [class*="break-words"], [class*="inline-show-more"], [class*="headline"]')];
-    for (const el of cands) {
-      if (!(nameEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
-      const t = rawHeadline(el.innerText);
-      if (t) { result.headline = t; break; }
-    }
-  }
-  // Fallbacks: an h2-based element inside main, then the page title
-  if (!result.headline) {
-    const headlineEl = mainEl.querySelector('[class*="headline"]') || mainEl.querySelector("h2");
-    result.headline = rawHeadline(headlineEl && headlineEl.innerText);
-  }
-  if (!result.headline) {
-    // "Name - Position | LinkedIn"  or  "Name | Position | LinkedIn"
-    const parts = document.title.split("|").map(s => s.trim()).filter(Boolean);
-    if (parts.length >= 3 && /linkedin/i.test(parts[parts.length - 1])) {
-      result.headline = rawHeadline(parts.slice(1, -1).join(", "));
-    }
-    if (!result.headline) {
-      const titleMatch = document.title.match(/—\s*(.+?)\s*\|/);
-      if (titleMatch) result.headline = rawHeadline(titleMatch[1]);
-    }
+  const aboutSec = findSection("About", "about");
+  if (aboutSec) {
+    const lines = visibleLines(aboutSec).filter((l) => !/^about$/i.test(l) && !UI_LINE_RE.test(l));
+    result.about = lines.join(" ").trim() || "Not specified";
   }
 
-  const allSections = [...document.querySelectorAll("section")].filter(s => !s.closest("#li-ai-panel"));
-
-  const profileCardSection = allSections.find((s, i) => {
-    const h2text = (s.querySelector("h2")?.innerText || "").trim();
-    const isUI = /activity|about|featured|people|might|experience|education|skill|recommendation/i.test(h2text);
-    return h2text.length > 2 && !isUI && i >= 1;
-  });
-  if (profileCardSection) {
-    const cardLines = (profileCardSection.innerText || "").split("\n").map(l => l.trim()).filter(l => l.length > 1);
-    for (const line of cardLines) {
-      if (line.length > 3 && line.length < 80 &&
-          (line.includes(",") || /(india|usa|uk|canada|australia|germany|singapore|remote|area)/i.test(line))) {
-        result.country = line; break;
-      }
-    }
+  const roles = parseExperience(findSection("Experience", "experience"));
+  if (roles.length) {
+    result.experience = roles.slice(0, 10).map((r) => r.title + (r.company ? " at " + r.company : "")).join(" | ");
+    const cur = roles[0];
+    // "Headline / Position" = the current job title from the newest Experience entry
+    if (cur.title.length <= 120 && !DATE_RANGE_RE.test(cur.title)) result.position = cur.title;
+    result.current_company = cur.company;
   }
-
-  const aboutSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "About");
-  if (aboutSection) {
-    const clone = aboutSection.cloneNode(true);
-    clone.querySelectorAll("h2, button, svg, #li-ai-panel").forEach(el => el.remove());
-    result.about = (clone.innerText || "").replace(/^About\s*/i, "").replace(/\s{3,}/g, " ").trim() || "Not specified";
-  }
-
-  const expSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Experience");
-  if (expSection) {
-    const liItems = expSection.querySelectorAll("li");
-    const expTitles = [];
-    for (const li of liItems) {
-      const clone = li.cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const lines = (clone.innerText || "").split("\n").map(l => l.trim()).filter(l => l);
-      if (lines[0] && lines[0].length > 2) expTitles.push(lines[0]);
-    }
-    if (expTitles.length) {
-      // Full Experience string (was previously only available from Apify)
-      result.experience = expTitles.slice(0, 10).join(" | ");
-      const expText = expTitles[0];
-      result.current_company = expText.includes(" at ")
-        ? expText.split(" at ").slice(-1)[0].trim()
-        : expText;
-      // "Headline / Position" = current job title from the top Experience entry.
-      // Skip lines that are clearly not a title (e.g. lines containing years).
-      const looksLikeTitle =
-        expText && expText.length <= 120 && !/\b(19|20)\d{2}\b/.test(expText);
-      if (looksLikeTitle) result.position = expText;
-    }
-  }
-  // No usable Experience entry → fall back to the LinkedIn headline
+  result.current_company = currentCompanyFromTopCard(topCard) || result.current_company || "Not specified";
   if (!result.position) result.position = result.headline;
-  if (!result.current_company) result.current_company = "Not specified";
 
-  const eduSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Education");
-  if (eduSection) {
-    const eduList = [];
-    for (const li of eduSection.querySelectorAll("li")) {
-      const clone = li.cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const txt = (clone.innerText || "").split("\n")[0]?.trim() || "";
-      if (txt.length > 2) eduList.push(txt);
-    }
-    result.education = eduList.join(" | ") || "Not specified";
-  }
-  if (!result.education) result.education = "Not specified";
+  result.education = firstLines(findSection("Education", "education"), 6).join(" | ") || "Not specified";
+  result.skills    = firstLines(findSection("Skills", "skills"), 15, 100).join(" • ") || "Not specified";
+  result.projects  = firstLines(findSection("Projects", "projects"), 6).join(" | ") || "No projects";
 
-  const skillSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Skills");
-  if (skillSection) {
-    const skillList = [];
-    for (const li of skillSection.querySelectorAll("li")) {
-      const clone = li.cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const txt = (clone.innerText || "").split("\n")[0]?.trim() || "";
-      if (txt.length > 1 && txt.length < 100) skillList.push(txt);
-    }
-    result.skills = skillList.slice(0, 15).join(" • ") || "Not specified";
-  }
-  if (!result.skills) result.skills = "Not specified";
-
-  const projSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Projects");
-  if (projSection) {
-    const projList = [];
-    for (const li of projSection.querySelectorAll("li")) {
-      const clone = li.cloneNode(true);
-      clone.querySelectorAll("button, svg, ul").forEach(el => el.remove());
-      const txt = (clone.innerText || "").split("\n")[0]?.trim() || "";
-      if (txt.length > 2) projList.push(txt);
-    }
-    result.projects = projList.join(" | ") || "No projects";
-  }
-  if (!result.projects) result.projects = "No projects";
-
-  const actSection = allSections.find(s => (s.querySelector("h2")?.innerText || "").trim() === "Activity");
-  if (actSection) {
-    const fullText = actSection.innerText || "";
-    // The section lists several items (posts, comments, reposts) — take the NEWEST
-    // time on it, not the first one, and read LinkedIn's compact "3d • / 2w • / 1mo •".
-    result.activity = newestActivityText(fullText);
-    if (!result.activity) {
-      result.activity = fullText.toLowerCase().includes("posted") ? "Posted recently"
-        : fullText.length > 200 ? "Has recent activity"
-        : "No recent activity";
-    }
+  const actSec = findSection("Activity", "content_collections");
+  if (actSec) {
+    // innerText has LinkedIn's compact "3d •"; textContent adds the screen-reader "3 days ago"
+    const text = (actSec.innerText || "") + "\n" + (actSec.textContent || "");
+    result.activity = newestActivityText(text) ||
+      (/\bposted\b/i.test(text) ? "Posted recently" : text.length > 200 ? "Has recent activity" : "No recent activity");
   }
   if (!result.activity) result.activity = "No activity data";
 
@@ -321,7 +329,7 @@ function injectStyles() {
       --li-bg:#fff; --li-fg:#111827; --li-fg-2:#374151; --li-muted:#6b7280; --li-muted-2:#9ca3af;
       --li-border:#e5e7eb; --li-border-2:#d1d5db; --li-surface:#f9fafb; --li-surface-2:#f3f4f6;
       --li-input-bg:#fff; --li-track:#e5e7eb; --li-thumb:#d1d5db;
-      --li-blue:#0a66c2; --li-green:#059669; --li-purple:#7c3aed;
+      --li-blue:#0a66c2; --li-green:#059669; --li-purple:#7c3aed; --li-purple-fg:#fff;
       --li-blue-fill:#0a66c2; --li-blue-fg:#fff;
       --li-green-fill:#059669; --li-green-fg:#fff;
       --li-ok:#16a34a; --li-warn:#f59e0b; --li-bad:#dc2626;
@@ -333,7 +341,7 @@ function injectStyles() {
       --li-bg:#1d2226; --li-fg:#e6eaed; --li-fg-2:#cfd4d8; --li-muted:#9aa3ab; --li-muted-2:#949ca3;
       --li-border:#363c42; --li-border-2:#454c53; --li-surface:#23282d; --li-surface-2:#2b3136;
       --li-input-bg:#2b3136; --li-track:#363c42; --li-thumb:#454c53;
-      --li-blue:#6cb1ff; --li-green:#45c08b; --li-purple:#a78bfa;
+      --li-blue:#6cb1ff; --li-green:#45c08b; --li-purple:#a78bfa; --li-purple-fg:#101418;
       --li-blue-fill:#6cb1ff; --li-blue-fg:#101418;
       --li-green-fill:#45c08b; --li-green-fg:#101418;
       --li-ok:#4ade80; --li-warn:#fbbf24; --li-bad:#f87171;
@@ -430,7 +438,7 @@ function injectStyles() {
     .li-kw.blue .li-kw-addbtn:hover{background:var(--li-blue-fill);color:var(--li-blue-fg);}
     .li-sig{margin-top:6px;padding-top:12px;border-top:1px solid var(--li-border);}
     .li-sig-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 14px;}
-    .li-sig-share{flex-shrink:0;padding:1px 8px;border-radius:999px;background:rgba(10,102,194,.1);color:var(--li-blue);font-size:11px!important;font-weight:700;font-variant-numeric:tabular-nums;}
+    .li-sig-share{display:inline-flex;align-items:center;flex-shrink:0;padding:2px 9px;border-radius:999px;background:rgba(10,102,194,.12);color:var(--li-blue);font-size:11px!important;font-weight:700;line-height:1.4;font-variant-numeric:tabular-nums;}
     @media (max-width:660px){.li-sig-grid{grid-template-columns:1fr;}}
     .li-input,.li-textarea{width:100%;box-sizing:border-box;border:1px solid var(--li-border-2);border-radius:6px;padding:7px 9px;font-size:13px!important;font-family:inherit;color:var(--li-fg);background:var(--li-input-bg);text-align:left;}
     .li-textarea{min-height:72px;max-height:190px;resize:vertical;line-height:1.45;}
@@ -453,7 +461,7 @@ function injectStyles() {
     .li-cs-row{display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;}
     .li-cs-label{font-size:11px!important;font-weight:700;color:var(--li-purple);text-transform:uppercase;letter-spacing:.5px;}
     .li-cs-tab{border:1.5px solid var(--li-border-2);background:var(--li-input-bg);color:var(--li-muted);border-radius:999px;font-size:12px!important;font-weight:600;padding:3px 12px;cursor:pointer;font-family:inherit;}
-    .li-cs-tab.active-casual{border-color:var(--li-purple);background:var(--li-purple);color:#fff;}
+    .li-cs-tab.active-casual{border-color:var(--li-purple);background:var(--li-purple);color:var(--li-purple-fg);}
     .li-cs-tab.active-pro{border-color:var(--li-blue);background:var(--li-blue-fill);color:var(--li-blue-fg);}
     .li-cs-text{font-size:12.5px!important;line-height:1.5;color:var(--li-fg-2);background:var(--li-input-bg);border:1px solid var(--li-border);border-radius:6px;padding:7px 9px;margin-bottom:6px;max-height:110px;overflow-y:auto;white-space:pre-wrap;}
     .li-cs-actions{display:flex;gap:6px;justify-content:flex-end;}
@@ -471,12 +479,39 @@ function injectStyles() {
     .li-ai-title{font-size:11px!important;font-weight:800;letter-spacing:.6px;color:var(--li-blue);}
     .li-ai-head-actions{display:flex;gap:4px;align-items:center;}
     .li-ai-mini{border:1px solid var(--li-border-2);background:var(--li-input-bg);color:var(--li-muted);border-radius:999px;font-size:11px!important;font-weight:700;padding:2px 10px;cursor:pointer;font-family:inherit;}
-    .li-ai-mini.on{border-color:var(--li-purple);background:var(--li-purple);color:#fff;}
+    .li-ai-mini.on{border-color:var(--li-purple);background:var(--li-purple);color:var(--li-purple-fg);}
     .li-ai-close{background:none;border:none;color:var(--li-muted-2);font-size:16px!important;cursor:pointer;line-height:1;padding:0 2px;}
     .li-ai-close:hover{color:var(--li-fg);}
     .li-ai-ctx{font-size:11px!important;color:var(--li-muted-2);padding:0 12px 6px 12px;}
     .li-ai-sug{border:1px solid var(--li-border);border-radius:8px;padding:9px 12px;margin:0 10px 8px 10px;font-size:12.5px!important;line-height:1.5;color:var(--li-fg-2);cursor:pointer;background:var(--li-bg);}
     .li-ai-sug:hover{border-color:var(--li-purple);background:var(--li-surface);}
+    .li-ai-mini.on.pro{border-color:var(--li-blue-fill);background:var(--li-blue-fill);color:var(--li-blue-fg);}
+    .li-ai-mini:disabled{opacity:.55;cursor:default;}
+
+    /* ── Suggested outreach (bottom of both result panels) ─────────────── */
+    .li-outreach{margin-top:18px;padding-top:16px;border-top:1px solid var(--li-border);text-align:left;}
+    .li-outreach-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;}
+    .li-outreach-title{margin:0;font-size:14px!important;font-weight:700;color:var(--li-fg);}
+    .li-outreach-tools{display:flex;gap:6px;align-items:center;}
+    .li-outreach-icon{display:inline-flex;align-items:center;padding:3px 8px;}
+    .li-outreach-angle{margin:0 0 10px;font-size:13px!important;line-height:1.5;color:var(--li-fg-2);}
+    .li-outreach-angle strong{color:var(--li-fg);}
+    .li-outreach-item{border:1px solid var(--li-border);border-radius:8px;padding:10px 12px 8px;margin-bottom:8px;background:var(--li-surface);}
+    .li-outreach-label{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px;font-size:11px!important;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--li-muted);}
+    .li-outreach-count{font-weight:600;text-transform:none;letter-spacing:0;font-variant-numeric:tabular-nums;}
+    .li-outreach-count.over{color:var(--li-bad);}
+    .li-outreach-text{margin:0 0 6px;font-size:13px!important;line-height:1.55;color:var(--li-fg);white-space:pre-wrap;word-break:break-word;}
+    .li-outreach-row{display:flex;justify-content:flex-end;}
+    .li-outreach-copy{height:28px;padding:0 12px;}
+    .li-outreach-status{margin:0 0 10px;font-size:12.5px!important;line-height:1.5;color:var(--li-muted);}
+    .li-outreach-error{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;border:1px solid var(--li-warn-border);border-radius:8px;background:var(--li-warn-bg);color:var(--li-warn-fg);font-size:12.5px!important;line-height:1.45;}
+    .li-outreach-foot{margin:4px 0 0;font-size:11px!important;line-height:1.5;color:var(--li-muted);}
+    .li-outreach-skel{height:12px;margin:10px 0;border-radius:4px;background:var(--li-surface-2);animation:li-pulse 1.4s ease-in-out infinite;}
+    .li-outreach-skel.short{width:62%;}
+    @keyframes li-pulse{50%{opacity:.45;}}
+    .li-link{border:0;padding:0;background:none;color:var(--li-blue);font:inherit;font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:2px;}
+    .li-outreach button:focus-visible{outline:2px solid var(--li-blue);outline-offset:2px;}
+    @media (prefers-reduced-motion:reduce){.li-outreach-skel{animation:none;}}
 
     /* ── Keyboard focus + scrollbars (panels, forms, ✨ popup, AI note) ── */
     #li-ai-analyze-btn:focus-visible,#li-icp-btn:focus-visible,.li-btn:focus-visible,
@@ -492,29 +527,73 @@ function injectStyles() {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function isProfilePage() { return /linkedin\.com\/in\//i.test(window.location.href); }
+// The person's main profile page (also while a /overlay/… modal such as Contact
+// info is open over it). Sub-pages like /recent-activity/ or /details/ have no
+// top card, so no Activity / ICP buttons there.
+function isProfilePage() { return /^\/in\/[^/]+\/?(overlay\/.*)?$/i.test(location.pathname); }
 
+function currentProfileSlug() { return liLeadSlug(location.href); }
+
+// One canonical URL per person: https://www.linkedin.com/in/<slug>/
+function profileKeyUrl() { return liProfileUrl(location.href) || location.href.split("?")[0]; }
+
+// LinkedIn's own profile action buttons (Message / More / Connect / Follow …),
+// found by their text or screen-reader label so class-name changes don't matter.
+const ACTION_BTN_SEL = 'button, a[role="button"], a[href*="/messaging/"]';
+const actionLabel = (b) => cleanLine((b.innerText || b.textContent || "") + " " + (b.getAttribute("aria-label") || ""));
+function actionButtons(scope) {
+  return [...scope.querySelectorAll(ACTION_BTN_SEL)]
+    .filter((b) => !b.closest("aside, header, nav, footer, " + OUR_UI_SEL + ', [class*="msg-overlay"]'));
+}
+function pickActionButton(btns) {
+  const has = (re) => btns.find((b) => re.test(actionLabel(b)));
+  return has(/^more\b/i) || has(/^message\b/i) || has(/^(connect|follow|pending)\b|\binvite .+ to connect\b/i) ||
+    has(/^open to\b/i) || null;
+}
+
+// The card holding the person's name: a <section> in LinkedIn's usual markup;
+// otherwise the smallest block around the name that also holds its action buttons.
+function topCardSection() {
+  const main = document.querySelector("main") || document.body;
+  const h1 = main.querySelector("h1");
+  if (!h1) return null;
+  const known = h1.closest('section, [class*="top-card"], [componentkey*="topcard" i], [data-view-name*="top-card"]');
+  if (known && known !== main) return known;
+  for (let el = h1.parentElement, i = 0; el && el !== main && i < 10; el = el.parentElement, i++) {
+    if (pickActionButton(actionButtons(el))) return el;
+  }
+  // No buttons at all: the nearest block that also holds the lines under the name
+  for (let el = h1.parentElement, i = 0; el && el !== main && i < 4; el = el.parentElement, i++) {
+    if (visibleLines(el).length >= 3) return el;
+  }
+  return h1.parentElement;
+}
+
+let _noNameLogged = false;
 function findActionTarget() {
+  const card = topCardSection();
   const selectors = [
     '[class*="pv-s-profile-actions"]',
     '[class*="profile-actions"]',
     '[class*="profile-card-actions"]',
-    '[data-view-name*="profile"]',
-    'main .ph5:not([class*="profile"])',
   ];
-  for (const sel of selectors) {
-    const el = document.querySelector(sel);
-    if (el) {
-      const btn = el.querySelector('button, a[role="button"]');
-      if (btn) return btn;
-      return el;
+  for (const scope of [card, document]) {
+    if (!scope) continue;
+    for (const sel of selectors) {
+      const el = scope.querySelector(sel);
+      if (el && !el.closest("aside")) return el.querySelector('button, a[role="button"]') || el;
     }
   }
-  const allBtns = [...document.querySelectorAll('main button, main a[role="button"]')];
-  const moreBtn    = allBtns.find(el => (el.innerText || "").trim().toLowerCase().includes("more"));
-  const messageBtn = allBtns.find(el => (el.innerText || "").trim().toLowerCase().includes("message"));
-  const openToBtn  = allBtns.find(el => (el.innerText || "").trim().toLowerCase().includes("open to"));
-  return moreBtn || messageBtn || openToBtn || allBtns[0] || null;
+  // Unknown layout: LinkedIn's own buttons by label — the name's card first, then the page
+  for (const scope of [card, document.querySelector("main")]) {
+    const hit = scope && pickActionButton(actionButtons(scope));
+    if (hit) return hit;
+  }
+  // Last resort: right under the person's name, so the buttons are never missing
+  const h1 = (document.querySelector("main") || document).querySelector("h1");
+  if (h1) return h1.parentElement && h1.parentElement !== document.body ? h1.parentElement : h1;
+  if (!_noNameLogged) { _noNameLogged = true; console.info("[LI-AI] Activity / ICP buttons: profile name not found on this page yet"); }
+  return null;
 }
 
 function escHtml(str) {
@@ -579,36 +658,77 @@ function watchTheme() {
   } catch (e) { /* media query optional */ }
 }
 
-// ─── Stored scores: one press calculates AND keeps the result per profile ─────
-function scoreStoreKey() {
-  return "liScore:" + window.location.href.split("?")[0];
+// ─── Per-profile storage (scores, typed form values, outreach drafts) ─────────
+// Keys use the canonical profile URL. Older builds keyed by the raw address
+// (with or without the trailing slash) — those are still read, then replaced.
+function storeKey(prefix) { return prefix + profileKeyUrl(); }
+
+function legacyStoreKeys(prefix) {
+  const raw = location.href.split("?")[0].split("#")[0];
+  const alt = raw.endsWith("/") ? raw.slice(0, -1) : raw + "/";
+  return [prefix + raw, prefix + alt].filter((k) => k !== storeKey(prefix));
 }
 
-function loadStoredScores() {
-  return new Promise(resolve => {
+function storageGet(keys) {
+  return new Promise((resolve) => {
     try {
-      const key = scoreStoreKey();
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get([key], r => resolve((r && r[key]) || {}));
-      } else {
-        resolve(JSON.parse(localStorage.getItem(key) || "{}"));
-      }
+      if (!chrome.runtime || !chrome.runtime.id) return resolve({});
+      chrome.storage.local.get(keys, (r) => resolve(r || {}));
     } catch (e) { resolve({}); }
   });
 }
 
-function saveStoredScore(kind, data) {
-  loadStoredScores().then(all => {
-    all[kind] = { data, savedAt: Date.now() };
-    try {
-      const key = scoreStoreKey();
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ [key]: all });
-      } else {
-        localStorage.setItem(key, JSON.stringify(all));
-      }
-    } catch (e) { /* storage unavailable — score still displayed */ }
-  });
+function storageSet(items, removeKeys) {
+  try {
+    if (!chrome.runtime || !chrome.runtime.id) return;
+    chrome.storage.local.set(items);
+    if (removeKeys && removeKeys.length) chrome.storage.local.remove(removeKeys);
+  } catch (e) { /* extension reloaded — the page keeps working without storage */ }
+}
+
+// Object stored under `prefix` for this profile, merged over any legacy copies.
+async function loadProfileStore(prefix) {
+  const key = storeKey(prefix);
+  const legacy = legacyStoreKeys(prefix);
+  const r = await storageGet([key, ...legacy]);
+  return Object.assign({}, ...legacy.map((k) => r[k] || {}), r[key] || {});
+}
+
+function saveProfileStore(prefix, value, key) {
+  storageSet({ [key || storeKey(prefix)]: value }, key ? [] : legacyStoreKeys(prefix));
+}
+
+function scoreStoreKey() { return storeKey("liScore:"); }
+
+// ─── Stored Activity form values: typed fields survive a page reload ──────────
+function loadActivityFormValues() { return loadProfileStore("liActForm:"); }
+
+// _v:2 = holds only typed values. Older stores also kept page values
+// (activity text, mutual count), which must not override a fresh scrape.
+function saveActivityFormValues(values, key) { saveProfileStore("liActForm:", Object.assign({ _v: 2 }, values), key); }
+const PAGE_FIELDS = ["activity", "mutual_connections"];
+
+// Only the values you typed. Pre-filled page values (e.g. "Last active 2 days ago")
+// are left out so a later visit reads them fresh instead of reusing stale ones.
+function collectActivityFormValues() {
+  const out = {};
+  for (const f of ACTIVITY_FIELDS) {
+    const el = document.getElementById(`li-f-${f.key}`);
+    if (el && el.value !== (el.dataset.scraped || "")) out[f.key] = el.value;
+  }
+  return out;
+}
+
+function loadStoredScores() { return loadProfileStore("liScore:"); }
+
+// `key` = the profile key captured when the calculation STARTED, so a result
+// never lands on another person if the user navigated away meanwhile.
+async function saveStoredScore(kind, data, key) {
+  key = key || scoreStoreKey();
+  const r = await storageGet([key]);
+  const all = Object.assign({}, key === scoreStoreKey() ? await loadStoredScores() : {}, r[key] || {});
+  all[kind] = { data, savedAt: Date.now() };
+  saveProfileStore("liScore:", all, key === scoreStoreKey() ? undefined : key);
 }
 
 function fmtSavedAt(ts) {
@@ -653,19 +773,28 @@ function addAIButton() {
 // ─── Backend calls ─────────────────────────────────────────────────────────────
 // Routed through background.js: the extension (not the LinkedIn page) talks to
 // the local server, so Chrome's page → localhost restrictions never apply.
+// Apify scrapes and AI calls are slow; a sleeping Render server adds ~30-50s.
+const API_TIMEOUTS = { "/analyze": 150000, "/icp-score": 120000, "/suggest-messages": 100000, "/outreach-suggestion": 90000,
+  "/icp-config": 70000, "/activity-points": 70000, "/activity-keywords": 70000 };
+
 function apiFetch(path, body) {
+  const timeoutMs = API_TIMEOUTS[path] || 45000;
   return new Promise((resolve, reject) => {
-    const reloaded = () => reject(new Error("Extension was reloaded — refresh this LinkedIn tab"));
+    let done = false;
+    const finish = (fn, arg) => { if (!done) { done = true; clearTimeout(guard); fn(arg); } };
+    const reloaded = () => finish(reject, new Error("Extension was reloaded — refresh this LinkedIn tab"));
+    // Safety net in case the background worker never answers
+    const guard = setTimeout(() => finish(reject, new Error(`No response after ${Math.round(timeoutMs / 1000)}s — refresh the page and try again`)), timeoutMs + 8000);
     try {
       if (!chrome.runtime || !chrome.runtime.id) return reloaded();
-      chrome.runtime.sendMessage({ type: "li-api", path, method: body === undefined ? "GET" : "POST", body }, (res) => {
+      chrome.runtime.sendMessage({ type: "li-api", path, method: body === undefined ? "GET" : "POST", body, timeoutMs }, (res) => {
         if (chrome.runtime.lastError || !res) return reloaded();
-        if (res.error) return reject(new Error(res.error));
+        if (res.error) return finish(reject, new Error(res.error));
         if (!res.ok) {
           const d = res.data && res.data.detail;
-          return reject(new Error(typeof d === "string" ? d : d ? JSON.stringify(d).slice(0, 200) : `Server error ${res.status}`));
+          return finish(reject, new Error(typeof d === "string" ? d : d ? JSON.stringify(d).slice(0, 200) : `Server error ${res.status}`));
         }
-        resolve(res.data);
+        finish(resolve, res.data);
       });
     } catch (e) { reloaded(); }
   });
@@ -725,6 +854,7 @@ function getLeadScores(url, name) {
         const lead = leads[liFindLeadKey(leads, url, name)];
         if (lead && lead.icpScore != null) out.icp_score = Math.round(lead.icpScore);
         if (lead && lead.activityScore != null) { out.activity_score = Math.round(lead.activityScore); out.activity_label = lead.activityLabel || ""; }
+        if (lead && lead.awaitingReply && lead.lastSentAt) out.awaiting_reply_days = Math.floor((Date.now() - lead.lastSentAt) / 86400000);
         // Scores saved on the profile page before the lead log existed ("liScore:<url>")
         const slug = liLeadSlug(url);
         for (const [k, v] of Object.entries(all || {})) {
@@ -740,6 +870,24 @@ function getLeadScores(url, name) {
     } catch (e) { resolve({}); }
   });
 }
+
+// ─── AI message preferences: sender role ─────────────────────────────────────
+// Set once in the extension's toolbar popup (icon → "My pitch": role) and stored
+// in liSettings; every AI surface on the page reads it here. Tone is NOT a saved
+// setting — it is picked on each AI note / AI suggestion, right where you write.
+function loadAiPrefs() {
+  return storageGet([LI_SETTINGS_KEY]).then((r) => r[LI_SETTINGS_KEY] || {});
+}
+
+// The tone last picked on any AI surface, so the next note opens on it instead of
+// resetting. Per-message choice still wins: every picker writes back through here.
+// Tone precedence: this composer's own toggle → a toggle made anywhere this
+// session → the saved Setup preference (toolbar popup → My pitch) → casual.
+let lastAiTone = "casual";
+let lastAiToneTouched = false;
+const cleanTone = (t) => (t === "pro" ? "pro" : "casual");
+function rememberAiTone(t) { lastAiToneTouched = true; return (lastAiTone = cleanTone(t)); }
+function defaultAiTone(prefs) { return lastAiToneTouched ? lastAiTone : cleanTone(prefs && prefs.aiTone); }
 
 // ─── Click Handler ─────────────────────────────────────────────────────────────
 
@@ -777,31 +925,39 @@ function createPanel({ id, btnId, title, headerColor, bodyId, closeId }) {
   return panel;
 }
 
+// A new, empty panel body. Forms attach their listeners to the body, so reusing
+// the old element after Refresh / Edit would fire every handler twice (one ✕
+// click removing two keywords, one Enter adding a keyword twice).
+function freshPanelBody(bodyId) {
+  const old = document.getElementById(bodyId);
+  if (!old) return null;
+  const body = old.cloneNode(false);
+  old.replaceWith(body);
+  return body;
+}
+
 // ─── Activity Score: form with the details used by scoring_service.py ─────────
 // Points: `def` = default max points, `ptsKey` = key in activity_points.json.
 // The number on each field is editable; the rule (tooltip) scales with it.
 const ptsOf = (p, part, of) => Math.round((p * part) / of);
 const ACTIVITY_FIELDS = [
   { key: "position",           label: "Headline / Position",   type: "text", ptsKey: "signals", def: 10,
-    rule: (p) => `Hiring/growth signals (also read from About and recent posts): hiring words ${ptsOf(p, 5, 10)} · job openings ${ptsOf(p, 3, 10)} · growth news ${ptsOf(p, 2, 10)}` },
+    rule: (p) => `Hiring/growth signals (also read from About and recent posts): hiring now ${ptsOf(p, 5, 10)} · recent promotion ${ptsOf(p, 3, 10)} · company growing ${ptsOf(p, 2, 10)}` },
   { key: "activity",           label: "Recent Activity",       type: "text", hint: 'e.g. "Posted 2 weeks ago"', ptsKey: "recent_activity", def: 30,
-    rule: (p) => `Last post within 7 days = ${p} · within 30 days = ${ptsOf(p, 15, 30)} · within 90 days = ${ptsOf(p, 5, 30)}` },
-  { key: "posts_30_days",      label: "Posts in Last 30 Days", type: "number", hint: "blank = count from Apify", ptsKey: "posts_30_days", def: 10,
-    rule: (p) => `4 or more posts in the last 30 days = ${p}` },
-  { key: "posts_90_days",      label: "Posts in Last 90 Days", type: "number", hint: "blank = count from Apify", ptsKey: "posts_90_days", def: 10,
-    rule: (p) => `10 or more posts in the last 90 days = ${p}` },
-  { key: "avg_likes",          label: "Avg Likes / Post",      type: "number", hint: "blank = Apify average", ptsKey: "avg_likes", def: 5,
-    rule: (p) => `10 or more likes per post = ${p}` },
-  { key: "avg_comments",       label: "Avg Comments / Post",   type: "number", hint: "blank = Apify average", ptsKey: "avg_comments", def: 10,
-    rule: (p) => `5 or more comments per post = ${p}` },
-  { key: "avg_reposts",        label: "Avg Reposts / Post",    type: "number", hint: "blank = Apify average", ptsKey: "avg_reposts", def: 5,
-    rule: (p) => `3 or more reposts per post = ${p}` },
+    rule: (p) => `Last activity within 7 days = ${p} · within 30 days = ${ptsOf(p, 2, 3)} · within 90 days = ${ptsOf(p, 1, 3)}` },
+  { key: "posts_90_days",      label: "Posts in Last 90 Days", type: "number", hint: "blank = count from Apify", ptsKey: "posting_frequency", def: 20,
+    rule: (p) => `Posting frequency (last 90 days): 10+ posts = ${p} · 5-9 = ${ptsOf(p, 3, 4)} · 1-4 = ${ptsOf(p, 1, 2)}` },
+  { key: "posts_30_days",      label: "Posts in Last 30 Days", type: "number", hint: "shown in the breakdown" },
+  { key: "avg_likes",          label: "Avg Likes / Post",      type: "number", hint: "blank = Apify average", ptsKey: "engagement", def: 20,
+    rule: (p) => `Engagement: High = ${p} · Medium = ${ptsOf(p, 1, 2)} · Low = ${ptsOf(p, 1, 4)} — High needs 2 of: 10+ likes, 5+ comments, 3+ reposts` },
+  { key: "avg_comments",       label: "Avg Comments / Post",   type: "number", hint: "blank = Apify average" },
+  { key: "avg_reposts",        label: "Avg Reposts / Post",    type: "number", hint: "blank = Apify average" },
   { key: "mutual_connections", label: "Mutual Connections",    type: "number", ptsKey: "mutual_connections", def: 10,
-    rule: (p) => `10+ mutual = ${p} · 5+ = ${ptsOf(p, 5, 10)} · 1+ = ${ptsOf(p, 2, 10)}` },
+    rule: (p) => `20+ mutual = ${p} · 10-19 = ${ptsOf(p, 7, 10)} · 5-9 = ${ptsOf(p, 5, 10)} · 1-4 = ${ptsOf(p, 2, 10)}` },
 ];
 // Scored from the page (no form field), but its points are editable too
 const ACTIVITY_COMPLETENESS = { label: "Profile Completeness", ptsKey: "completeness", def: 10,
-  rule: (p) => `Read from the page: headline, About, experience, skills and photo — ${+(p / 5).toFixed(1)} each` };
+  rule: (p) => `Read from the page: photo, headline, About, experience and company — ${+(p / 5).toFixed(1)} each` };
 const ACTIVITY_POINT_DEFS = [...ACTIVITY_FIELDS, ACTIVITY_COMPLETENESS];
 
 // Hiring / growth signal keywords (activity_keywords.json). Each list earns its
@@ -809,7 +965,7 @@ const ACTIVITY_POINT_DEFS = [...ACTIVITY_FIELDS, ACTIVITY_COMPLETENESS];
 // About or the newest posts.
 const SIGNAL_KW_FIELDS = [
   { key: "hiring", label: "Hiring words", share: 50 },
-  { key: "job",    label: "Job-opening words", share: 30 },
+  { key: "job",    label: "Promotion words", share: 30 },
   { key: "growth", label: "Growth words", share: 20 },
 ];
 
@@ -935,20 +1091,48 @@ function formValue(key, value) {
   return value;
 }
 
-function openActivityForm() {
+function setBusy(ids, busy) {
+  for (const id of ids) { const b = document.getElementById(id); if (b) b.disabled = !!busy; }
+}
+
+function statusWithRetry(id, message, onRetry) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = message + " ";
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "li-link";
+  b.textContent = "Try again";
+  b.onclick = onRetry;
+  el.appendChild(b);
+}
+const ACTIVITY_ACTIONS = ["li-ai-refresh", "li-ai-save", "li-ai-calc"];
+
+async function openActivityForm(reset) {
+  reset = reset === true;   // a click event must never count as "reset"
   createPanel({
     id: "li-ai-panel", btnId: "li-ai-analyze-btn", title: "⚡ Activity Score",
     bodyId: "li-ai-body", closeId: "li-ai-close",
   });
 
-  const p    = scrapeProfile();
-  const body = document.getElementById("li-ai-body");
+  const p     = scrapeProfile();
+  const saved = await loadActivityFormValues();
+  // What the page says right now — only values that differ from it are "yours" and get saved
+  const scraped = Object.fromEntries(ACTIVITY_FIELDS.map((f) => [f.key, String(formValue(f.key, p[f.key]) ?? "")]));
+  for (const f of ACTIVITY_FIELDS) {
+    if (f.key === "position") {
+      // Always prefer what the page actually shows; a saved value (even a stale
+      // blank from an earlier Save) only fills in when the page scrape is empty.
+      if (!p.position && saved.position) p.position = saved.position;
+      continue;
+    }
+    if (!saved._v && PAGE_FIELDS.includes(f.key)) continue;   // stale page value from an old build
+    // Posts, Avg Likes, etc. reset to blank on Refresh like the keywords do.
+    if (!reset && Object.prototype.hasOwnProperty.call(saved, f.key)) p[f.key] = saved[f.key];
+  }
+  const body = freshPanelBody("li-ai-body");
+  if (!body) return;
   body.innerHTML = `
-    <div class="li-form-note">
-      Sent to <code>/analyze</code> and scored by <code>services/scoring_service.py</code>.
-      Name, About, Company, Education, Skills and Projects come from the page automatically.
-      Click a points number to change how much that field counts.
-    </div>
     <form id="li-activity-form" class="li-form-grid">
       ${ACTIVITY_FIELDS.map(f => activityFieldHTML(f, formValue(f.key, p[f.key]))).join("")}
       <input type="hidden" id="li-f-profile_url" value="${escAttr(p.profileUrl)}">
@@ -957,25 +1141,51 @@ function openActivityForm() {
       ${signalKeywordsHTML()}
     </form>
     ${ptsTotalHTML("li-ai-pts-total", `<span class="li-pts-extra">Profile Completeness <span>from the page</span> ${ptsPillHTML(ACTIVITY_COMPLETENESS, "blue")}</span>`)}
-    <div class="li-form-status" id="li-ai-status"></div>
+    <div class="li-form-status" id="li-ai-status" role="status"></div>
     <div class="li-form-actions">
-      <button type="button" class="li-btn li-btn-ghost" id="li-ai-refresh">🔄 Refresh from Page</button>
-      <button type="button" class="li-btn li-btn-blue" id="li-ai-calc">📊 Calculate Score</button>
+      <button type="button" class="li-btn li-btn-ghost" id="li-ai-refresh">🔄 Refresh</button>
+      <button type="button" class="li-btn li-btn-ghost" id="li-ai-save">💾 Save</button>
+      <button type="button" class="li-btn li-btn-blue" id="li-ai-calc">🎯 Calculate Activity Score</button>
     </div>
   `;
 
   document.getElementById("li-activity-form").addEventListener("submit", e => e.preventDefault());
+  for (const f of ACTIVITY_FIELDS) {
+    const el = document.getElementById(`li-f-${f.key}`);
+    if (el) el.dataset.scraped = scraped[f.key];
+  }
   const refreshActPts = wirePoints(body, ACTIVITY_POINT_DEFS, document.getElementById("li-ai-pts-total"), ACTIVITY_TOTAL,
-    () => setActivityStatus("Points changed — press Calculate Score to use them."));
-  apiFetch("/activity-points").then((pts) => { setPoints(body, pts); refreshActPts(); refreshSignalShares(body); }).catch(() => {});
-  wireChipEditors(body, "li-sig", () => setActivityStatus("Keywords changed — press Calculate Score to use them."));
+    () => setActivityStatus("Points changed — press Save or Calculate to use them."));
+  wireChipEditors(body, "li-sig", () => setActivityStatus("Keywords changed — press Save or Calculate to use them."));
   body.addEventListener("input", (e) => { if (e.target.closest('.li-pts-in[data-pts="signals"]')) refreshSignalShares(body); });
   body.querySelector(".li-pts-reset")?.addEventListener("click", () => refreshSignalShares(body));
   SIGNAL_KW_FIELDS.forEach((f) => renderChips("li-sig", f.key));
   refreshSignalShares(body);
-  apiFetch("/activity-keywords").then((lists) => setKwLists("li-sig", lists)).catch(() => {});
-  document.getElementById("li-ai-refresh").onclick = openActivityForm;
-  document.getElementById("li-ai-calc").onclick    = calculateActivityScore;
+  document.getElementById("li-ai-refresh").onclick = () => openActivityForm(true);
+  document.getElementById("li-ai-save").onclick    = () => saveActivitySettings();
+  document.getElementById("li-ai-calc").onclick    = () => calculateActivityScore();
+
+  // Save / Calculate post the whole keyword lists, so they stay off until the saved
+  // lists have loaded — otherwise one click would overwrite them with blanks.
+  setBusy(["li-ai-save", "li-ai-calc"], true);
+  setActivityStatus(reset ? "Loading saved points…" : "Loading saved keywords and points…");
+  Promise.all([apiFetch("/activity-points"), reset ? Promise.resolve(null) : apiFetch("/activity-keywords")])
+    .then(([pts, lists]) => {
+      if (!body.isConnected) return;   // replaced by a newer form
+      setPoints(body, pts); refreshActPts(); refreshSignalShares(body);
+      if (lists) {
+        setKwLists("li-sig", lists);
+        setActivityStatus(`Loaded ${countKeywords(lists)} saved keywords.`);
+      } else {
+        setActivityStatus("Fields and keywords cleared — Save or Calculate will store the keywords blank. Close and reopen the panel to reload your saved ones.");
+      }
+      setBusy(["li-ai-save", "li-ai-calc"], false);
+    })
+    .catch((err) => {
+      if (!body.isConnected) return;
+      statusWithRetry("li-ai-status", `⚠️ Could not load your saved keywords/points (${err.message}). Save and Calculate stay off so they aren't overwritten.`,
+        () => openActivityForm(reset));
+    });
 
   // LinkedIn lazy-loads mutual connections — pick them up shortly after opening
   if (!p.mutual_connections) {
@@ -989,13 +1199,31 @@ function openActivityForm() {
   }
 }
 
+async function saveActivitySettings() {
+  setBusy(ACTIVITY_ACTIONS, true);
+  setActivityStatus("Saving…");
+  try {
+    saveActivityFormValues(collectActivityFormValues());
+    await apiFetch("/activity-points", readPoints(document.getElementById("li-ai-body")));
+    const keywords = await apiFetch("/activity-keywords", collectSignalKeywords());
+    setActivityStatus(`✅ Saved ${countKeywords(keywords)} keywords, your points and this profile's typed values.`);
+  } catch (err) {
+    setActivityStatus(`❌ Not saved: ${err.message}`);
+  } finally {
+    setBusy(ACTIVITY_ACTIONS, false);
+  }
+}
+
 async function calculateActivityScore() {
   const value  = key => document.getElementById(`li-f-${key}`)?.value ?? "";
   const btn    = document.getElementById("li-ai-calc");
-  const p      = scrapeProfile();   // details no longer shown in the form
+  if (!btn) return;
+  const p      = scrapeProfile();
+  const scoreKey = scoreStoreKey();     // this person, even if the user navigates away
+  const slug     = currentProfileSlug();
   const payload = {
-    profile_url:        value("profile_url"),
-    profileUrl:         value("profile_url"),
+    profile_url:        value("profile_url") || p.profileUrl,
+    profileUrl:         value("profile_url") || p.profileUrl,
     avatar:             value("avatar") || p.avatar,
     name:               p.name,
     about:              p.about,
@@ -1006,7 +1234,7 @@ async function calculateActivityScore() {
     experience:         p.experience,
     position:           value("position") || p.position,
     headline:           value("headline") || p.headline,
-    country:            value("country")  || p.country,
+    country:            p.country,
     activity:           value("activity"),
     posts_30_days:      parseInt(value("posts_30_days"), 10)   || 0,
     posts_90_days:      parseInt(value("posts_90_days"), 10)   || 0,
@@ -1016,29 +1244,31 @@ async function calculateActivityScore() {
     mutual_connections: parseInt(value("mutual_connections"), 10) || 0,
   };
 
-  btn.disabled = true;
-  btn.textContent = "⏳ Calculating...";
-  setActivityStatus("Scoring profile activity...");
+  setBusy(ACTIVITY_ACTIONS, true);
+  btn.textContent = "⏳ Calculating…";
+  setActivityStatus("Reading their profile and recent posts — this can take up to a minute…");
 
   try {
+    saveActivityFormValues(collectActivityFormValues());
     // Save the points first: the server scores every factor with them
     await apiFetch("/activity-points", readPoints(document.getElementById("li-ai-body")));
     await apiFetch("/activity-keywords", collectSignalKeywords());
     const data = await apiFetch("/analyze", payload);
-    renderPanel(data);
-    saveStoredScore("activity", data);
+    await saveStoredScore("activity", data, scoreKey);
     updateLead(p.profileUrl, data.name || p.name, {
       headline: data.headline || p.headline || "",
       company: (data.current_company && data.current_company !== "Not specified") ? data.current_company : (p.current_company || ""),
       activityScore: data.score_total || 0,
       activityLabel: data.score_label || "",
     });
+    if (currentProfileSlug() !== slug || !document.getElementById("li-ai-body")) return;   // saved; nothing to show here
+    renderPanel(data, null, { fresh: true });
   } catch (err) {
     console.error("[LI-AI] ❌", err);
-    const status = document.getElementById("li-ai-status");
-    if (status) status.innerHTML = `❌ <strong>${escHtml(err.message)}</strong> — is the server running? Start it with <code>run_server.bat</code> (port 8765)`;
-    btn.disabled = false;
-    btn.textContent = "📊 Calculate Score";
+    setActivityStatus(`❌ ${err.message}`);
+    const b = document.getElementById("li-ai-calc");
+    if (b) b.textContent = "🎯 Calculate Activity Score";
+    setBusy(ACTIVITY_ACTIONS, false);
   }
 }
 
@@ -1194,24 +1424,30 @@ function icpFieldHTML(f) {
 }
 const renderIcpChips = (key) => renderChips("li-icp", key);
 function wireIcpChipEditors(form) {
-  wireChipEditors(form, "li-icp", () => setIcpStatus("Unsaved changes — press Save Keywords or Calculate ICP Score."));
+  wireChipEditors(form, "li-icp", () => setIcpStatus("Unsaved changes — press Save or Calculate ICP Score."));
 }
 
-async function openIcpForm() {
+const ICP_ACTIONS = ["li-icp-refresh", "li-icp-save", "li-icp-calc"];
+
+async function openIcpForm(reset) {
+  reset = reset === true;   // a click event must never count as "reset"
   createPanel({
     id: "li-icp-panel", btnId: "li-icp-btn", title: "🎯 ICP Score",
     headerColor: "#059669", bodyId: "li-icp-body", closeId: "li-icp-close",
   });
 
-  const body = document.getElementById("li-icp-body");
+  const body = freshPanelBody("li-icp-body");
+  if (!body) return;
   body.innerHTML = `
+    <div class="li-form-note">Keywords match whole words. Plurals and space/hyphen variants count too, so "health care" also finds "healthcare".</div>
     <form id="li-icp-form" class="li-form-grid">
       ${ICP_FIELDS.map(icpFieldHTML).join("")}
     </form>
     ${ptsTotalHTML("li-icp-pts-total")}
-    <div class="li-form-status" id="li-icp-status">Loading saved keywords…</div>
+    <div class="li-form-status" id="li-icp-status" role="status">${reset ? "Loading saved points…" : "Loading saved keywords…"}</div>
     <div class="li-form-actions">
-      <button type="button" class="li-btn li-btn-ghost" id="li-icp-save">💾 Save Keywords</button>
+      <button type="button" class="li-btn li-btn-ghost" id="li-icp-refresh">🔄 Refresh</button>
+      <button type="button" class="li-btn li-btn-ghost" id="li-icp-save">💾 Save</button>
       <button type="button" class="li-btn li-btn-green" id="li-icp-calc">🎯 Calculate ICP Score</button>
     </div>
   `;
@@ -1221,29 +1457,47 @@ async function openIcpForm() {
   wireIcpChipEditors(icpForm);
   ICP_FIELDS.forEach((f) => renderIcpChips(f.key));
   const refreshIcpPts = wirePoints(body, ICP_FIELDS, document.getElementById("li-icp-pts-total"), ICP_TOTAL,
-    () => setIcpStatus("Unsaved changes — press Save Keywords or Calculate ICP Score."));
-  document.getElementById("li-icp-save").onclick = async () => {
-    try {
-      const saved = await saveIcpKeywords();
-      setIcpStatus(`✅ Saved ${countKeywords(saved)} keywords to icp_config.json`);
-    } catch (err) {
-      setIcpStatus(`❌ ${err.message} — is the server running? Start it with <code>run_server.bat</code> (port 8765)`);
-    }
-  };
-  document.getElementById("li-icp-calc").onclick = calculateIcpScore;
+    () => setIcpStatus("Unsaved changes — press Save or Calculate ICP Score."));
+  document.getElementById("li-icp-refresh").onclick = () => openIcpForm(true);
+  document.getElementById("li-icp-save").onclick = () => saveIcpClick();
+  document.getElementById("li-icp-calc").onclick = () => calculateIcpScore();
 
+  // Save / Calculate post every keyword list, so they stay off until the saved
+  // lists have loaded — otherwise one click would overwrite them with blanks.
+  setBusy(["li-icp-save", "li-icp-calc"], true);
   try {
     const config = await apiFetch("/icp-config");
-    for (const f of ICP_FIELDS) {
-      const el = document.getElementById(`li-icp-${f.key}`);
-      if (el) el.value = (config[f.key] || []).join("\n");
-      renderIcpChips(f.key);
+    if (!body.isConnected) return;   // replaced by a newer form
+    if (!reset) {
+      for (const f of ICP_FIELDS) {
+        const el = document.getElementById(`li-icp-${f.key}`);
+        if (el) el.value = (config[f.key] || []).join("\n");
+        renderIcpChips(f.key);
+      }
     }
     setPoints(body, config.POINTS);
     refreshIcpPts();
-    setIcpStatus(`Loaded ${countKeywords(config)} saved keywords.`);
+    setIcpStatus(reset
+      ? "Keywords cleared — Save or Calculate will store them blank. Close and reopen the panel to reload your saved ones."
+      : `Loaded ${countKeywords(config)} saved keywords.`);
+    setBusy(["li-icp-save", "li-icp-calc"], false);
   } catch (err) {
-    setIcpStatus(`⚠️ Could not load saved keywords (${err.message}) — type them in and press Save.`);
+    if (!body.isConnected) return;
+    statusWithRetry("li-icp-status", `⚠️ Could not load your saved keywords (${err.message}). Save and Calculate stay off so they aren't overwritten.`,
+      () => openIcpForm(reset));
+  }
+}
+
+async function saveIcpClick() {
+  setBusy(ICP_ACTIONS, true);
+  setIcpStatus("Saving…");
+  try {
+    const saved = await saveIcpKeywords();
+    setIcpStatus(`✅ Saved ${countKeywords(saved)} keywords and your points.`);
+  } catch (err) {
+    setIcpStatus(`❌ Not saved: ${err.message}`);
+  } finally {
+    setBusy(ICP_ACTIONS, false);
   }
 }
 
@@ -1259,7 +1513,7 @@ function collectIcpKeywords() {
 }
 
 function countKeywords(config) {
-  return Object.values(config).reduce((n, list) => n + (Array.isArray(list) ? list.length : 0), 0);
+  return Object.values(config || {}).reduce((n, list) => n + (Array.isArray(list) ? list.length : 0), 0);
 }
 
 async function saveIcpKeywords() {
@@ -1267,66 +1521,86 @@ async function saveIcpKeywords() {
 }
 
 async function calculateIcpScore() {
-  const btn     = document.getElementById("li-icp-calc");
-  const saveBtn = document.getElementById("li-icp-save");
-  btn.disabled = true;
-  saveBtn.disabled = true;
-  btn.textContent = "⏳ Calculating...";
+  const btn = document.getElementById("li-icp-calc");
+  if (!btn) return;
+  const scoreKey = scoreStoreKey();     // this person, even if the user navigates away
+  const slug     = currentProfileSlug();
+  const p        = scrapeProfile();     // before any wait: the page may change while we save
+  setBusy(ICP_ACTIONS, true);
+  btn.textContent = "⏳ Calculating…";
 
   try {
     const saved = await saveIcpKeywords();
-    setIcpStatus(`✅ Saved ${countKeywords(saved)} keywords — scoring...`);
+    if (currentProfileSlug() !== slug) return;   // moved to someone else: don't score them as this person
+    setIcpStatus(`✅ Saved ${countKeywords(saved)} keywords — scoring (the company lookup can take up to a minute)…`);
 
-    const p    = scrapeProfile();
+    const company = p.current_company && p.current_company !== "Not specified" ? p.current_company : "";
     const result = await apiFetch("/icp-score", {
       name:                 p.name,
       country:              p.country,
       position:             p.position,
-      about:                p.about,
-      current_company_name: p.current_company,
-      current_company:      p.current_company,
+      headline:             p.headline,
+      about:                p.about && p.about !== "Not specified" ? p.about : "",
+      current_company_name: company,
+      current_company:      company,
       profile_url:          p.profileUrl,
       profileUrl:           p.profileUrl,
     });
-    const kCount   = countKeywords(saved);
-    renderIcpResult(result, kCount);
-    saveStoredScore("icp", { result, keywordCount: kCount });
+    const kCount = countKeywords(saved);
+    await saveStoredScore("icp", { result, keywordCount: kCount }, scoreKey);
     updateLead(p.profileUrl, p.name, {
       headline: p.headline || "",
-      company: (p.current_company && p.current_company !== "Not specified") ? p.current_company : "",
+      company,
       icpScore: result.icp_score || 0,
     });
+    if (currentProfileSlug() !== slug || !document.getElementById("li-icp-body")) return;   // saved; nothing to show here
+    renderIcpResult(result, kCount, null, { fresh: true });
   } catch (err) {
     setIcpStatus(`❌ ${err.message}`);
-    btn.disabled = false;
-    saveBtn.disabled = false;
-    btn.textContent = "🎯 Calculate ICP Score";
+    const b = document.getElementById("li-icp-calc");
+    if (b) b.textContent = "🎯 Calculate ICP Score";
+    setBusy(ICP_ACTIONS, false);
   }
 }
 
-function renderIcpResult(result, keywordCount, storedAt) {
-  applyTheme();
-  const rows = Object.entries(result.breakdown || {}).map(([label, data]) => {
-    const pct   = data.max ? Math.round((data.score / data.max) * 100) : 0;
-    const color = data.score === data.max ? "var(--li-green)" : data.score > 0 ? "var(--li-blue)" : "var(--li-track)";
-    const textColor = data.score > 0 ? color : "var(--li-muted)";   // track grey is invisible as text
+// Breakdown bars shared by both result panels. `rawDetail` is trusted HTML.
+function scoreRowsHTML(rows, fullColor) {
+  return rows.map((row) => {
+    const pct   = row.max ? Math.max(0, Math.min(100, Math.round((row.score / row.max) * 100))) : 0;
+    const color = row.max && row.score >= row.max ? fullColor : row.score > 0 ? "var(--li-blue)" : "var(--li-track)";
+    const textColor = row.score > 0 ? color : "var(--li-muted)";   // track grey is invisible as text
+    const detail = row.rawDetail || (row.detail ? escHtml(row.detail) : "");
     return `
       <div style="margin-bottom:12px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-          <span style="font-size:13px;font-weight:500;color:var(--li-fg-2);">${escHtml(label)}</span>
-          <span style="font-size:13px;font-weight:700;color:${textColor};font-variant-numeric:tabular-nums;">${data.score}/${data.max}</span>
+          <span style="font-size:13px;font-weight:500;color:var(--li-fg-2);">${escHtml(row.label)}</span>
+          <span style="font-size:13px;font-weight:700;color:${textColor};font-variant-numeric:tabular-nums;">${row.score}/${row.max}</span>
         </div>
         <div style="height:6px;background:var(--li-track);border-radius:999px;overflow:hidden;">
           <div style="height:100%;width:${pct}%;background:${color};border-radius:999px;"></div>
         </div>
-        <div style="font-size:11px;color:var(--li-muted);margin-top:3px;">${escHtml(data.reason || "")}</div>
+        ${detail ? `<div style="font-size:11px;color:var(--li-muted);margin-top:3px;line-height:1.45;">${detail}</div>` : ""}
       </div>`;
   }).join("");
+}
+
+function renderIcpResult(result, keywordCount, storedAt, opts) {
+  applyTheme();
+  const body = freshPanelBody("li-icp-body");
+  if (!body) return;
+  // Fixed order: chrome.storage hands stored objects back with their keys sorted
+  const ORDER = ["Industry Match", "Job Title Match", "Company Size Match", "Geography Match", "Profile Keywords"];
+  const rank = (k) => (ORDER.indexOf(k) + 1) || 99;
+  const rows = Object.entries(result.breakdown || {}).sort(([a], [b]) => rank(a) - rank(b)).map(([label, d]) => ({
+    label, score: (d && d.score) || 0, max: (d && d.max) || 0, detail: (d && d.reason) || "",
+  }));
+  const missing = Array.isArray(result.missing) ? result.missing
+    : rows.filter((r) => r.detail === "No data").map((r) => r.label);
 
   const score = result.icp_score || 0;
   const color = score >= 70 ? "var(--li-green)" : score >= 40 ? "var(--li-warn)" : "var(--li-bad)";
 
-  document.getElementById("li-icp-body").innerHTML = `
+  body.innerHTML = `
     ${storedAt ? `<div class="li-form-note">💾 Stored score from <strong>${escHtml(fmtSavedAt(storedAt))}</strong> — press <strong>Edit Keywords</strong> to calculate a fresh one.</div>` : ""}
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
       <div style="display:flex;align-items:center;gap:12px;">
@@ -1341,11 +1615,14 @@ function renderIcpResult(result, keywordCount, storedAt) {
         <button type="button" class="li-btn li-btn-green" id="li-icp-edit">✏️ Edit Keywords</button>
       </div>
     </div>
+    ${missing.length ? `<div class="li-form-note">No data on this profile for <strong>${escHtml(missing.join(", "))}</strong>. Those count as 0, so the real fit may be higher.</div>` : ""}
     <div style="border-top:1px solid var(--li-border);padding-top:14px;">
-      ${rows}
+      ${scoreRowsHTML(rows, "var(--li-green)")}
     </div>
+    ${outreachBlockHTML("icp")}
   `;
-  document.getElementById("li-icp-edit").onclick = openIcpForm;
+  document.getElementById("li-icp-edit").onclick = () => openIcpForm();
+  mountOutreach(body.querySelector(".li-outreach"), { fresh: !!(opts && opts.fresh) });
 }
 
 async function handleAnalyzeClick() {
@@ -1380,107 +1657,94 @@ async function handleIcpClick() {
 }
 
 // ─── Render Panel ──────────────────────────────────────────────────────────────
-function renderPanel(data, storedAt) {
+// Shows the server's numbers as-is: the panel, the lead log and the AI all use
+// the same score.
+const SIGNAL_NAMES = { hiring: "Hiring", job: "Promotion", growth: "Growth" };
+const COMPLETENESS_NAMES = { photo: "photo", headline: "headline", about: "About", experience: "experience", company: "company" };
+
+// Same wording as the server's time_ago(); recomputed at render time so a stored
+// score never keeps saying "Last posted yesterday" a week after it was saved.
+function liTimeAgoText(d) {
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days <= 0) {
+    const hours = Math.floor((Date.now() - d.getTime()) / 3600000);
+    return hours > 0 ? `${hours}h ago` : "today";
+  }
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  if (days < 30) { const w = Math.floor(days / 7);  return `${w} week${w > 1 ? "s" : ""} ago`; }
+  if (days < 365) { const m = Math.floor(days / 30); return `${m} month${m > 1 ? "s" : ""} ago`; }
+  const y = Math.floor(days / 365); return `${y} year${y > 1 ? "s" : ""} ago`;
+}
+
+// The Recent Activity line for an /analyze result. With the post's real date
+// (activity_date) the relative phrase is rebuilt NOW and the exact local date
+// and time is shown; older stored scores without it keep the server's text.
+function liActivityText(data) {
+  const raw = (data && data.activity) || "No activity data";
+  const d = data && data.activity_date ? new Date(data.activity_date) : null;
+  if (!d || isNaN(d.getTime())) return raw;
+  const abs = d.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  const snippet = (raw.match(/\s—\s(".*")\s*$/) || [])[0] || "";
+  const verb = /^reposted/i.test(raw) ? "Reposted someone else's post" : "Last posted";
+  return `${verb} ${liTimeAgoText(d)} (${abs})${snippet}`;
+}
+
+function renderPanel(data, storedAt, opts) {
   applyTheme();
+  const body = freshPanelBody("li-ai-body");
+  if (!body) return;
   const name            = data.name            || "Unknown";
   const country         = data.country         || "Not specified";
   const current_company = data.current_company || "Not specified";
-  const position        = (/notification|follower|connection/i.test(data.position || "") ? "" : data.position) || "";
-  const activity        = data.activity        || "No activity data";
-  const activity_url    = data.activity_url    || "";
+  const activity        = liActivityText(data);
+  const activity_url    = /^https?:\/\//i.test(data.activity_url || "") ? data.activity_url : "";
 
-  let score_total        = data.score_total        || 0;
-  let score_label        = data.score_label        ||
+  const score_total = data.score_total || 0;
+  const score_label = data.score_label ||
     (score_total >= 70 ? "🟢 Ready to Engage" : score_total >= 40 ? "🟡 Needs Nurturing" : "🔴 Difficult to Engage");
-  let score_activity     = data.score_activity     || 0;
-  let score_posts        = data.score_posts        || 0;
-  let score_engagement   = data.score_engagement   || 0;
-  let score_completeness = data.score_completeness || 0;
-  let score_signals      = data.score_signals      || 0;
-  let score_mutuals      = data.score_mutuals      || 0;
-  const avg_engagement   = data.avg_engagement     || 0;
-  const posts_30_days    = data.posts_30_days      || 0;
-  const posts_90_days    = data.posts_90_days      || 0;
-  const engagement_label = data.engagement_label   || "No data";
-  const mutual_count     = data.mutual_connections  || 0;
 
   // Server-side maxima (editable points); older stored scores use the defaults
   const max = {
     activity: data.max_activity ?? 30, posts: data.max_posts ?? 20, engagement: data.max_engagement ?? 20,
     completeness: data.max_completeness ?? 10, signals: data.max_signals ?? 10, mutuals: data.max_mutuals ?? 10,
   };
-  const sig = (v) => Math.round((v * max.signals) / 10);   // 5 / 3 / 2 on the default 10-point scale
 
-  // Re-check signals from page-scraped text (more accurate since user is logged in)
-  const positionText = (data.position || "").toLowerCase();
-  const aboutText    = (data.about    || "").toLowerCase();
-  let signalsFixed   = score_signals;
-  const sk           = data.signal_keywords || {};
-  const lc           = (list) => list.map((k) => String(k).toLowerCase());
-  const hiringKw     = lc(sk.hiring || ["hiring", "we're hiring", "join our team", "open roles"]);
-  const promoKw      = lc(sk.job    || ["promoted", "new role", "excited to announce"]);
-  const growthKw     = lc(sk.growth || ["growing", "we raised", "series a", "series b", "funded"]);
-  for (const kw of hiringKw) {
-    if (positionText.includes(kw) || aboutText.includes(kw)) { signalsFixed = Math.max(signalsFixed, sig(5)); break; }
-  }
-  for (const kw of promoKw) {
-    if (positionText.includes(kw) || aboutText.includes(kw)) { signalsFixed = Math.max(signalsFixed, sig(3)); break; }
-  }
-  for (const kw of growthKw) {
-    if (positionText.includes(kw) || aboutText.includes(kw)) { signalsFixed = Math.max(signalsFixed, sig(2)); break; }
-  }
-  if (signalsFixed !== score_signals) {
-    score_signals = signalsFixed;
-    const maxTotal = data.score_max || Object.values(max).reduce((a, b) => a + b, 0);
-    const raw = score_activity + score_posts + score_engagement + score_completeness + score_signals + score_mutuals;
-    score_total   = maxTotal ? Math.round((raw * 100) / maxTotal) : 0;
-    score_label   = score_total >= 70 ? "🟢 Ready to Engage" : score_total >= 40 ? "🟡 Needs Nurturing" : "🔴 Difficult to Engage";
-  }
-
-  // Colors
   let scoreColor = "var(--li-bad)";
   if (score_total >= 70) scoreColor = "var(--li-ok)";
   else if (score_total >= 40) scoreColor = "var(--li-warn)";
 
-  // Activity HTML
   let activityHTML = escHtml(activity);
   if (activity_url) {
-    activityHTML = `<a href="${escHtml(activity_url)}" target="_blank" style="color:var(--li-blue);text-decoration:none;font-weight:600;">${escHtml(activity)} 🔗</a>`;
-  } else if (activity.includes("ago") || activity.toLowerCase().includes("today") || activity.toLowerCase().includes("yesterday")) {
+    activityHTML = `<a href="${escAttr(activity_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--li-blue);text-decoration:none;font-weight:600;">${escHtml(activity)} 🔗</a>`;
+  } else if (/\b(ago|today|yesterday)\b/i.test(activity)) {
     activityHTML = `<strong style="color:var(--li-ok);">⏱️ ${escHtml(activity)}</strong>`;
-  } else if (activity.toLowerCase().includes("recent")) {
+  } else if (/recent/i.test(activity)) {
     activityHTML = `<strong style="color:var(--li-warn);">⏱️ ${escHtml(activity)}</strong>`;
   }
 
-  // Score breakdown rows
+  const engagement = data.engagement_label || "No data";
+  const engDetail = /^no data/i.test(engagement) ? engagement
+    : `${engagement} · avg ${data.avg_likes || 0} likes, ${data.avg_comments || 0} comments, ${data.avg_reposts || 0} reposts per post`;
+  const missing = (data.completeness_missing || []).map((k) => COMPLETENESS_NAMES[k] || k);
+  const hits = Object.entries(data.signal_hits || {}).filter(([, kw]) => kw);
+  const signalDetail = hits.length
+    ? hits.map(([list, kw]) => `${SIGNAL_NAMES[list] || list}: "${kw}"`).join(" · ")
+    : ("signal_hits" in data ? "No hiring or growth words found" : "");
+
   const scoreRows = [
-    { label: "Recent Activity",    score: score_activity,     max: max.activity, detail: "" },
-    { label: "Posting Frequency",  score: score_posts,        max: max.posts, detail: `${posts_30_days} posts / 30d - ${posts_90_days} posts / 90d` },
-    { label: "Engagement Level",   score: score_engagement,   max: max.engagement, detail: engagement_label },
-    { label: "Profile Completeness", score: score_completeness, max: max.completeness, detail: "" },
-    { label: "Hiring/Growth Signals", score: score_signals,   max: max.signals, detail: "" },
-    { label: "Mutual Connections", score: score_mutuals,      max: max.mutuals, detail: `${mutual_count} mutual` },
+    { label: "Recent Activity",       score: data.score_activity || 0,     max: max.activity,     rawDetail: activityHTML },
+    { label: "Posting Frequency",     score: data.score_posts || 0,        max: max.posts,        detail: `${data.posts_90_days || 0} posts in 90 days · ${data.posts_30_days || 0} in the last 30` },
+    { label: "Engagement Level",      score: data.score_engagement || 0,   max: max.engagement,   detail: engDetail },
+    { label: "Profile Completeness",  score: data.score_completeness || 0, max: max.completeness, detail: missing.length ? "Missing: " + missing.join(", ") : "" },
+    { label: "Hiring/Growth Signals", score: data.score_signals || 0,      max: max.signals,      detail: signalDetail },
+    { label: "Mutual Connections",    score: data.score_mutuals || 0,      max: max.mutuals,      detail: `${data.mutual_connections || 0} mutual` },
   ];
+  const n = data.posts_analyzed || 0;
+  const basis = n ? `Based on ${n} recent post${n === 1 ? "" : "s"} plus the profile.`
+    : data.data_source === "form" ? "No post data — scored from the page and the values you typed." : "";
 
-  const scoreRowsHTML = scoreRows.map(row => {
-    const pct   = row.max ? Math.round((row.score / row.max) * 100) : 0;
-    const color = row.score === row.max ? "var(--li-ok)" : row.score > 0 ? "var(--li-blue)" : "var(--li-track)";
-    const textColor = row.score > 0 ? color : "var(--li-muted)";   // track grey is invisible as text
-    return `
-      <div style="margin-bottom:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-          <span style="font-size:13px;font-weight:500;color:var(--li-fg-2);">${escHtml(row.label)}</span>
-          <span style="font-size:13px;font-weight:700;color:${textColor};font-variant-numeric:tabular-nums;">${row.score}/${row.max}</span>
-        </div>
-        <div style="height:6px;background:var(--li-track);border-radius:999px;overflow:hidden;">
-          <div style="height:100%;width:${pct}%;background:${color};border-radius:999px;"></div>
-        </div>
-        ${row.detail ? `<div style="font-size:11px;color:var(--li-muted);margin-top:3px;">${escHtml(row.detail)}</div>` : ""}
-      </div>
-    `;
-  }).join("");
-
-  document.getElementById("li-ai-body").innerHTML = `
+  body.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
       <div>
         <div style="font-size:17px;font-weight:700;color:var(--li-fg);">${escHtml(name)}</div>
@@ -1490,25 +1754,218 @@ function renderPanel(data, storedAt) {
     </div>
     ${data.scrape_warning ? `<div class="li-form-note" style="border-color:var(--li-warn-border);background:var(--li-warn-bg);color:var(--li-warn-fg);">⚠️ ${escHtml(data.scrape_warning)}</div>` : ""}
     ${storedAt ? `<div class="li-form-note">💾 Stored score from <strong>${escHtml(fmtSavedAt(storedAt))}</strong> — press <strong>Edit Details</strong> to calculate a fresh one.</div>` : ""}
-
-
-    <!-- Outreach Readiness Score -->
     <div>
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:${basis ? 6 : 16}px;">
         <div style="font-size:40px;font-weight:800;color:${scoreColor};line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.02em;">${score_total}</div>
         <div>
           <div style="font-size:11px;color:var(--li-muted);">out of 100</div>
           <div style="font-size:16px;color:var(--li-fg);font-weight:700;margin-top:2px;">${escHtml(score_label)}</div>
         </div>
       </div>
+      ${basis ? `<div style="font-size:12px;color:var(--li-muted);margin-bottom:14px;">${escHtml(basis)}</div>` : ""}
       <div style="border-top:1px solid var(--li-border);padding-top:14px;">
-        ${scoreRowsHTML}
+        ${scoreRowsHTML(scoreRows, "var(--li-ok)")}
       </div>
     </div>
+    ${outreachBlockHTML("activity")}
   `;
-  document.getElementById("li-ai-edit").onclick = openActivityForm;
+  document.getElementById("li-ai-edit").onclick = () => openActivityForm();
+  mountOutreach(body.querySelector(".li-outreach"), { fresh: !!(opts && opts.fresh) });
 }
 
+// ─── Suggested outreach: a connection note + first message from the analysis ─
+const ICON_COPY = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>';
+const NOTE_LIMIT = 300;              // LinkedIn's connection-note limit
+const _outreachPending = {};         // "<profile>|<tone>" → in-flight request
+
+function outreachBlockHTML(kind) {
+  return `<section class="li-outreach" data-for="${kind}" aria-label="Suggested outreach">
+    <div class="li-outreach-head">
+      <h3 class="li-outreach-title">Suggested outreach</h3>
+      <div class="li-outreach-tools">
+        <button type="button" class="li-ai-mini" data-tone="casual" aria-pressed="false">Casual</button>
+        <button type="button" class="li-ai-mini" data-tone="pro" aria-pressed="false">Pro</button>
+        <button type="button" class="li-ai-mini li-outreach-icon" data-act="regen" title="Write a new suggestion" aria-label="Write a new suggestion">${ICON_REFRESH}</button>
+      </div>
+    </div>
+    <div class="li-outreach-body" aria-live="polite"></div>
+  </section>`;
+}
+
+function outreachItemHTML(field, label, text, limit) {
+  const count = limit ? `<span class="li-outreach-count${text.length > limit ? " over" : ""}">${text.length}/${limit}</span>` : "";
+  return `<div class="li-outreach-item">
+      <div class="li-outreach-label"><span>${label}</span>${count}</div>
+      <p class="li-outreach-text" data-field="${field}">${escHtml(text)}</p>
+      <div class="li-outreach-row"><button type="button" class="li-btn li-btn-ghost li-outreach-copy" data-copy="${field}">${ICON_COPY}<span>Copy</span></button></div>
+    </div>`;
+}
+
+function outreachBodyHTML(s) {
+  if (s.loading) {
+    return `<p class="li-outreach-status">Writing a ${s.tone === "pro" ? "professional" : "casual"} note from this analysis…</p>
+      <div class="li-outreach-skel"></div><div class="li-outreach-skel short"></div>`;
+  }
+  if (s.empty) {
+    return `<p class="li-outreach-status">Get a connection note and a first message written from this person's scores and profile.</p>
+      <div class="li-outreach-row"><button type="button" class="li-btn li-btn-blue" data-act="generate">Write suggestion</button></div>`;
+  }
+  let html = "";
+  if (s.error) {
+    html += `<div class="li-outreach-error" role="alert">Couldn't write a new suggestion: ${escHtml(s.error)}
+      <button type="button" class="li-ai-mini" data-act="retry">Retry</button></div>`;
+  }
+  const e = s.entry;
+  if (!e) return html;
+  if (s.stale) html += `<p class="li-outreach-status">Written before the latest score. <button type="button" class="li-link" data-act="regen">Rewrite it</button> to use the new analysis.</p>`;
+  if (e.angle) html += `<p class="li-outreach-angle"><strong>Why reach out:</strong> ${escHtml(e.angle)}</p>`;
+  if (e.note) html += outreachItemHTML("note", "Connection note", e.note, NOTE_LIMIT);
+  if (e.message) html += outreachItemHTML("message", "First message after they accept", e.message);
+  const from = [e.icp != null ? `ICP ${e.icp}` : "", e.activity != null ? `Activity ${e.activity}` : ""].filter(Boolean).join(" + ");
+  const who = e.source === "template" ? "Template (AI unavailable" + (e.notice ? ": " + escHtml(e.notice) : "") + ")" : "Written by AI";
+  html += `<p class="li-outreach-foot">${who} from ${from ? escHtml(from) : "the profile"}${e.role ? " · as " + escHtml(e.role) : ""} · ${escHtml(fmtSavedAt(e.at))}. Review before sending.</p>`;
+  return html;
+}
+
+// Everything the extension knows about this person: page + stored scores.
+async function outreachContext(tone) {
+  const p = scrapeProfile();
+  const stored = await loadStoredScores();
+  const prefs = await loadAiPrefs();
+  const leadsR = await storageGet([LI_LEADS_KEY]);
+  const allLeads = leadsR[LI_LEADS_KEY] || {};
+  const act = (stored.activity && stored.activity.data) || null;
+  const icp = (stored.icp && stored.icp.data && stored.icp.data.result) || null;
+  const NA = /^(not specified|unknown|no activity data|no recent activity|no projects)$/i;
+  const val = (v) => (v && !NA.test(String(v).trim()) ? String(v).trim() : "");
+  const name = val(act && act.name) || val(p.name);
+  const req = {
+    name,
+    first_name: name.split(/\s+/)[0] || "",
+    headline: val(p.headline) || val(act && act.headline),
+    position: val(p.position) || val(act && act.position),
+    current_company: val(p.current_company) || val(act && act.current_company),
+    country: val(p.country) || val(act && act.country),
+    about: (val(act && act.about) || val(p.about)).slice(0, 1500),
+    activity: val(act ? liActivityText(act) : "") || val(p.activity),
+    profile_url: profileKeyUrl(),
+    icp_score: icp ? Math.round(icp.icp_score || 0) : null,
+    icp_breakdown: icp ? icp.breakdown || {} : {},
+    activity_score: act ? Math.round(act.score_total || 0) : null,
+    activity_label: (act && act.score_label) || "",
+    engagement_label: (act && act.engagement_label) || "",
+    signal_hits: (act && act.signal_hits) || {},
+    tone,
+    sender_role: prefs.senderRole || "",
+  };
+  const lead = allLeads[liFindLeadKey(allLeads, req.profile_url, name)] || {};
+  if (val(lead.painPoint)) req.pain_point = val(lead.painPoint).slice(0, 200);
+  const prior = [];
+  if (val(lead.lastSentText)) prior.push('I last wrote: "' + val(lead.lastSentText).slice(0, 140).replace(/"/g, "'") + '"');
+  if (val(lead.lastTheirText)) prior.push('They replied: "' + val(lead.lastTheirText).slice(0, 140).replace(/"/g, "'") + '"');
+  if (prior.length) req.prior_contact = prior.join(" · ");
+  // Which scores the text was written from — a newer score makes it stale
+  const basis = [icp ? stored.icp.savedAt : 0, act ? stored.activity.savedAt : 0].join(":");
+  return { req, basis };
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall back below */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch (e) { return false; }
+}
+
+// Read-merge-write by the key captured for this person: another open panel may
+// have written meanwhile, and the page may already show someone else.
+async function updateOutreachStore(key, patch) {
+  const r = await storageGet([key]);
+  const next = Object.assign({}, r[key] || {}, patch);
+  storageSet({ [key]: next });
+  return next;
+}
+
+// opts.fresh = a score was just calculated → write a new suggestion right away.
+async function mountOutreach(section, opts) {
+  if (!section) return;
+  const key = storeKey("liOutreach:");
+  let store = await loadProfileStore("liOutreach:");
+  const prefs = await loadAiPrefs();
+  let tone = store.tone === "pro" || store.tone === "casual" ? store.tone : defaultAiTone(prefs);
+  const bodyEl = section.querySelector(".li-outreach-body");
+  const show = (state) => { if (section.isConnected) bodyEl.innerHTML = outreachBodyHTML(state); };
+  const paintTools = (busy) => section.querySelectorAll(".li-outreach-tools button").forEach((b) => {
+    b.disabled = !!busy;
+    if (!b.dataset.tone) return;
+    const on = b.dataset.tone === tone;
+    b.classList.toggle("on", on);
+    b.classList.toggle("pro", on && tone === "pro");
+    b.setAttribute("aria-pressed", String(on));
+  });
+
+  const generate = async (force) => {
+    const { req, basis } = await outreachContext(tone);
+    const cached = store[tone];
+    if (!force && cached && cached.basis === basis) { show({ entry: cached }); return; }
+    show({ loading: true, tone });
+    paintTools(true);
+    const pendKey = key + "|" + tone;
+    try {
+      if (!_outreachPending[pendKey]) {
+        _outreachPending[pendKey] = apiFetch("/outreach-suggestion", req).finally(() => { delete _outreachPending[pendKey]; });
+      }
+      const data = await _outreachPending[pendKey];
+      const entry = {
+        angle: data.angle || "", note: data.connection_note || "", message: data.message || "",
+        source: data.source || "ai", notice: data.notice || "", basis, role: req.sender_role || "", at: Date.now(),
+        icp: req.icp_score, activity: req.activity_score,
+      };
+      if (!entry.note && !entry.message) throw new Error("the server returned an empty suggestion");
+      store = await updateOutreachStore(key, { tone, [tone]: entry });
+      show({ entry });
+    } catch (err) {
+      show({ error: err.message, entry: cached });
+    } finally {
+      paintTools(false);
+    }
+  };
+
+  section.addEventListener("click", async (e) => {
+    const b = e.target.closest("button");
+    if (!b || !section.contains(b) || b.disabled) return;
+    if (b.dataset.tone) {
+      if (b.dataset.tone === tone) return;
+      tone = rememberAiTone(b.dataset.tone);
+      paintTools(false);
+      store = await updateOutreachStore(key, { tone });
+      generate(false);
+    } else if (b.dataset.act) {
+      generate(true);
+    } else if (b.dataset.copy) {
+      const text = section.querySelector(`.li-outreach-text[data-field="${b.dataset.copy}"]`)?.textContent || "";
+      const ok = await copyText(text);
+      const label = b.querySelector("span");
+      if (label) {
+        label.textContent = ok ? "Copied" : "Copy failed";
+        setTimeout(() => { if (label.isConnected) label.textContent = "Copy"; }, 1600);
+      }
+    }
+  });
+
+  paintTools(false);
+  if (opts && opts.fresh) return generate(true);
+  const cached = store[tone];
+  if (!cached) return show({ empty: true });
+  const { basis } = await outreachContext(tone);
+  show({ entry: cached, stale: cached.basis !== basis });
+}
 
 // ─── Message-box suggestions: Casual vs Professional ────────────────────────
 // Injects a small helper into LinkedIn's "New message" compose popup.
@@ -1712,6 +2169,41 @@ function scrapeChatMessages(editable, limit) {
   return [];
 }
 
+// LinkedIn renders only the newest page of a thread; earlier messages join the
+// DOM when the list is scrolled to its top. Scroll up a few times so the AI sees
+// the whole conversation, then put the reader back exactly where they were.
+async function harvestOlderMessages(editable, maxRounds) {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const ITEM_SEL = '.msg-s-event-listitem, li[class*="msg-s-event"], [class*="msg-s-message-list"] li';
+  try {
+    const container = convoContainer(editable);
+    const count = () => { try { return container.querySelectorAll(ITEM_SEL).length; } catch (e) { return 0; } };
+    const first = container.querySelector(ITEM_SEL);
+    if (!first) return 0;
+    let scroller = null;
+    for (let el = first.parentElement; el && el !== document.body; el = el.parentElement) {
+      let oy = "";
+      try { oy = getComputedStyle(el).overflowY; } catch (e) { break; }
+      if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight + 20) { scroller = el; break; }
+    }
+    if (!scroller) return 0;
+    const fromBottom = scroller.scrollHeight - scroller.scrollTop;   // keep the reader's place
+    let before = count();
+    const start = before;
+    for (let round = 0; round < (maxRounds || 4); round++) {
+      scroller.scrollTop = 0;
+      try { scroller.dispatchEvent(new Event("scroll", { bubbles: true })); } catch (e) { /* ignore */ }
+      await wait(700);
+      const now = count();
+      if (now <= before) break;    // LinkedIn loaded nothing more — that's the whole thread
+      before = now;
+      if (now >= AI_HISTORY_LIMIT * 2) break;   // far beyond what one request can use
+    }
+    scroller.scrollTop = scroller.scrollHeight - fromBottom;
+    return before - start;
+  } catch (e) { return 0; }
+}
+
 function chatFirstName(editable, history) {
   const other = (history || []).find((m) => m && m.sender !== "me" && m.name && !/^(you|them)$/i.test(m.name));
   if (other) return other.name.split(/\s+/)[0];
@@ -1779,10 +2271,11 @@ function ensureShadowObservers() {
 const SPARK_CSS = "display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:0 2px;padding:0;border:none;border-radius:50%;background:transparent;color:var(--li-blue,#0a66c2);font-size:16px;line-height:1;cursor:pointer;flex-shrink:0;vertical-align:middle;opacity:.85;";
 const AI_BOX_CSS = "margin:0;padding:12px;border:1px solid var(--li-border,#e5e7eb);border-radius:10px;background:var(--li-bg,#fff);box-shadow:0 4px 20px rgba(0,0,0,.18);font-family:-apple-system,'Segoe UI',Roboto,sans-serif;";
 const AI_ITEM_CSS = "display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;border:1px solid var(--li-border,#e5e7eb);border-radius:8px;background:var(--li-surface,#f9fafb);color:var(--li-fg,#111827);font-size:13px;line-height:1.45;cursor:pointer;font-family:inherit;";
+const AI_ROW_LABEL_CSS = "flex:0 0 auto;min-width:58px;margin-right:2px;";
 const AI_MINI_CSS = "padding:3px 10px;border:1px solid var(--li-border-2,#cbd5e1);border-radius:999px;background:var(--li-input-bg,#fff);color:var(--li-fg-2,#374151);font-size:11px;font-weight:700;cursor:pointer;";
 
-// ✨ popup analyses exactly this many recent chat messages.
-const AI_HISTORY_LIMIT = 5;
+// ✨ popup analyses this many recent chat messages (the backend caps the length).
+const AI_HISTORY_LIMIT = 40;
 
 // Profile bits for the AI — only when the profile on screen is the chat partner
 // (a chat overlay can be open over someone else's profile page).
@@ -1884,6 +2377,104 @@ function inviteProfileUrl(fullName) {
   return "";
 }
 
+// Connect clicked on a search result, My Network or feed card: remember whose card
+// it was, so the "Add a note" dialog can use that person's profile and scores.
+let _lastConnect = null;   // { url, name, headline, at }
+function watchConnectClicks() {
+  document.addEventListener("click", (e) => {
+    try {
+      const path = e.composedPath ? e.composedPath() : [e.target];
+      const btn = path.find((el) => el && el.matches && el.matches('button, [role="button"], a[href*="custom-invite"]'));
+      if (!btn || btn.closest(OUR_UI_SEL)) return;
+      if (!/^connect\b|\binvite .+ to connect\b/i.test(actionLabel(btn))) return;
+      let card = btn.parentElement, link = null;
+      for (let i = 0; card && i < 10; i++, card = card.parentElement) {
+        link = [...card.querySelectorAll('a[href*="/in/"]')].find((a) => !inSharedCard(a, card)) || null;
+        if (link) break;
+      }
+      const named = /invite (.+?) to connect/i.exec(btn.getAttribute("aria-label") || "");
+      const name = (named && cleanLine(named[1])) || (link ? cleanLine((link.innerText || link.textContent || "").split("\n")[0]) : "");
+      const lines = card ? visibleLines(card).filter((l) => l !== name && !UI_LINE_RE.test(l) && !COUNT_LINE_RE.test(l) &&
+        !/^(connect|message|follow|pending|·?\s*(1st|2nd|3rd\+?)|.*\bdegree connection)$/i.test(l)) : [];
+      _lastConnect = {
+        url: link ? liProfileUrl(link.getAttribute("href") || link.href) : "",
+        name, headline: lines.find((l) => l.length > 8) || "", at: Date.now(),
+      };
+    } catch (err) { /* never block LinkedIn's own click */ }
+  }, true);
+}
+
+// Who the open "Add a note" dialog is for: the dialog names them; their profile
+// URL comes from the page (on their profile) or from the card whose Connect was clicked.
+function inviteTarget(ta) {
+  const first = (s) => String(s || "").split(/\s+/)[0].toLowerCase();
+  const fromDialog = inviteFullName(ta);
+  const recent = _lastConnect && Date.now() - _lastConnect.at < 120000 ? _lastConnect : null;
+  const card = recent && (!fromDialog || first(recent.name) === first(fromDialog)) ? recent : null;
+  const fullName = fromDialog || (card && card.name) || "";
+  let url = inviteProfileUrl(fullName);
+  const onProfile = !!url;
+  if (!url && card) url = card.url;
+  return { fullName, first: fullName.split(/\s+/)[0] || "there", url, onProfile, card };
+}
+
+// Everything known about the invitee: their profile page (when open), their saved
+// Activity / ICP analysis, the lead log, or at least the card's headline.
+async function inviteAnalysis(t) {
+  const NA = /^(not specified|unknown|no activity data|no recent activity|no projects)$/i;
+  const val = (v) => (v && !NA.test(String(v).trim()) ? String(v).trim() : "");
+  const out = { name: t.fullName, first_name: t.first === "there" ? "" : t.first };
+  if (t.onProfile) {
+    const p = scrapeProfile();
+    Object.assign(out, { headline: val(p.headline), position: val(p.position), current_company: val(p.current_company),
+      country: val(p.country), about: val(p.about).slice(0, 1500), activity: val(p.activity) });
+  } else if (t.card) {
+    out.headline = val(t.card.headline);
+  }
+  if (!t.url) return out;
+  const scoreKey = "liScore:" + t.url;
+  const r = await storageGet([scoreKey, LI_LEADS_KEY]);
+  const stored = r[scoreKey] || {};
+  const act = (stored.activity && stored.activity.data) || null;
+  const icp = (stored.icp && stored.icp.data && stored.icp.data.result) || null;
+  const leads = r[LI_LEADS_KEY] || {};
+  const lead = leads[liFindLeadKey(leads, t.url, t.fullName)] || {};
+  const fill = (k, v) => { if (!out[k] && val(v)) out[k] = val(v); };
+  if (act) {
+    out.activity = val(liActivityText(act)) || out.activity || "";   // the server's text quotes their latest post ("X ago" recomputed now)
+    ["headline", "position", "current_company", "country"].forEach((k) => fill(k, act[k]));
+    if (!out.about) out.about = val(act.about).slice(0, 1500);
+    out.activity_score = Math.round(act.score_total || 0);
+    out.activity_label = act.score_label || "";
+    out.engagement_label = act.engagement_label || "";
+    out.signal_hits = act.signal_hits || {};
+  }
+  if (icp) { out.icp_score = Math.round(icp.icp_score || 0); out.icp_breakdown = icp.breakdown || {}; }
+  fill("headline", lead.headline);
+  fill("current_company", lead.company);
+  if (val(lead.painPoint)) out.pain_point = val(lead.painPoint).slice(0, 200);
+  const prior = [];
+  if (val(lead.lastSentText)) prior.push('I last wrote: "' + val(lead.lastSentText).slice(0, 140).replace(/"/g, "'") + '"');
+  if (val(lead.lastTheirText)) prior.push('They replied: "' + val(lead.lastTheirText).slice(0, 140).replace(/"/g, "'") + '"');
+  if (prior.length) out.prior_contact = prior.join(" · ");
+  return out;
+}
+
+// What a note was personalised from, shown under the suggestions.
+function noteBasis(a) {
+  const out = [];
+  if (a.position && a.current_company) out.push(`${a.position} at ${a.current_company}`);
+  else if (a.position || a.headline) out.push(a.position || a.headline);
+  if (a.icp_score != null) out.push(`ICP ${a.icp_score}`);
+  if (a.activity_score != null) out.push(`Activity ${a.activity_score}`);
+  if (/"/.test(a.activity || "")) out.push("latest post");
+  const sig = Object.keys(a.signal_hits || {});
+  if (sig.length) out.push(sig.join(" + ") + " signal");
+  if (a.pain_point) out.push("pain point");
+  if (a.prior_contact) out.push("past messages");
+  return out;
+}
+
 // One small "✨ AI note" pill above LinkedIn's invitation-note box.
 function injectInviteSpark() {
   for (const ta of inviteTextareas()) {
@@ -1908,8 +2499,9 @@ function recordSent(ed, text, kind) {
   try {
     let name = "", url = "", theirLast = "";
     if (kind === "invite") {
-      name = inviteFullName(ed);
-      url = inviteProfileUrl(name);
+      const t = inviteTarget(ed);
+      name = t.fullName;
+      url = t.url;
     } else {
       const history = scrapeChatMessages(ed, AI_HISTORY_LIMIT);
       name = chatFullName(ed, history);
@@ -1968,6 +2560,9 @@ async function fetchAiSuggestions(record, req, cacheKey, render) {
   let entry;
   try {
     const scores = await getLeadScores(req.profileUrl, req.fullName);
+    // Invite notes: the invitee's profile + saved ICP / Activity analysis. Chats: light
+    // profile context when the chat partner's profile is the page on screen.
+    const about = req.context === "invite" ? await inviteAnalysis(req.target) : aiProfileContext(req.first);
     const data = await apiFetch("/suggest-messages", {
       messages: req.history.map((m) => ({ sender: m.sender || "unknown", name: m.name || "", text: m.text })),
       tone: req.tone,
@@ -1978,11 +2573,14 @@ async function fetchAiSuggestions(record, req, cacheKey, render) {
       draft: req.draft,
       action: req.action,
       ...scores,
-      ...aiProfileContext(req.first),
+      ...about,
+      sender_role: req.role || "",
     });
     const list = (data.suggestions || []).filter((s) => typeof s === "string" && s.trim());
     if (!list.length) throw new Error("no suggestions returned");
-    entry = { list, pain: data.pain_point || "", painSource: data.pain_source || "" };
+    entry = { list, pain: data.pain_point || "", painSource: data.pain_source || "", analysis: data.analysis || "",
+              source: data.source || "ai", notice: data.notice || "",
+              basis: req.context === "invite" ? noteBasis({ ...scores, ...about }) : [] };
     if (entry.pain) updateLead(req.profileUrl, req.fullName, { painPoint: entry.pain });
   } catch (e) {
     entry = { error: String((e && e.message) || e).slice(0, 200) };
@@ -2019,14 +2617,12 @@ function placeSparkBox(el, box, opts) {
     const r = el.getBoundingClientRect();
     const vw = window.innerWidth, vh = window.innerHeight;
     const w = Math.round(Math.min(Math.max(r.width, 260), 480));
-    box.style.position = "fixed";
-    box.style.width = w + "px";
     // horizontally CENTERED over the message box, clamped inside the viewport
     const centerX = r.left + (r.width - w) / 2;
-    box.style.left = Math.round(Math.max(8, Math.min(centerX, vw - w - 8))) + "px";
-    box.style.overflowY = "auto";
-    box.style.zIndex = "99999";
-    box.style.top = ""; box.style.bottom = ""; box.style.maxHeight = "";
+    const next = {
+      position: "fixed", width: w + "px", left: Math.round(Math.max(8, Math.min(centerX, vw - w - 8))) + "px",
+      overflowY: "auto", zIndex: "99999", top: "", bottom: "", maxHeight: "",
+    };
 
     // bottom edge sits just ABOVE the send button (bottom-right corner of the box)
     let anchorY = opts.above ? r.top - 4 : r.bottom - 8;
@@ -2037,30 +2633,37 @@ function placeSparkBox(el, box, opts) {
       } catch (e) { /* ignore */ }
     }
 
-    const need = box.offsetHeight || 220;          // natural height after paint()
+    // Full content height WITHOUT lifting max-height: un-setting it, even for one
+    // measurement, collapses the scroll box and throws the reader back to the top.
+    const need = box.scrollHeight || 220;
     const maxH = Math.round(vh * 0.48);
     const spaceAbove = anchorY - 8;                // anchor → viewport top
     const spaceBelow = vh - anchorY - 8;           // anchor → viewport bottom
 
     if (spaceAbove >= Math.min(need, 200)) {
       // grow upward from the send button, never past the top of the screen
-      box.style.bottom = Math.round(vh - anchorY) + "px";
-      box.style.maxHeight = Math.max(140, Math.min(maxH, spaceAbove - 8)) + "px";
+      next.bottom = Math.round(vh - anchorY) + "px";
+      next.maxHeight = Math.max(140, Math.min(maxH, spaceAbove - 8)) + "px";
     } else if (spaceBelow >= Math.min(need, 200)) {
       // no room above → drop below the anchor instead
-      box.style.top = Math.round(anchorY + 8) + "px";
-      box.style.maxHeight = Math.min(spaceBelow, maxH) + "px";
+      next.top = Math.round(anchorY + 8) + "px";
+      next.maxHeight = Math.min(spaceBelow, maxH) + "px";
     } else if (spaceAbove >= spaceBelow) {
       // squeeze between the top of the screen and the anchor:
       // top + bottom both set → exact fit, header row stays visible, body scrolls
-      box.style.top = "8px";
-      box.style.bottom = Math.round(vh - anchorY) + "px";
-      box.style.maxHeight = "none";
+      next.top = "8px";
+      next.bottom = Math.round(vh - anchorY) + "px";
+      next.maxHeight = "none";
     } else {
-      box.style.top = Math.round(anchorY + 8) + "px";
-      box.style.bottom = "8px";
-      box.style.maxHeight = "none";
+      next.top = Math.round(anchorY + 8) + "px";
+      next.bottom = "8px";
+      next.maxHeight = "none";
     }
+
+    // Touch only what changed (this runs on every page tick) and keep the scroll spot
+    const scroll = box.scrollTop;
+    for (const [k, v] of Object.entries(next)) if (box.style[k] !== v) box.style[k] = v;
+    if (box.scrollTop !== scroll) box.scrollTop = scroll;
   } catch (e) { /* ignore */ }
 }
 
@@ -2145,6 +2748,13 @@ function readRecentMessages(editor, limit) {
 }
 
 const DRAFT_ACTIONS = [["improve", "Improve"], ["shorten", "Shorten"], ["grammar", "Fix grammar"]];
+// Tone pills on every ✨ AI note / AI suggestion — the tones the backend writes in.
+const TONES = [["casual", "Casual", "Warm and friendly, in plain words"],
+               ["pro", "Pro", "Professional: formal, concise, no emoji"]];
+const TONE_ON_CSS = {
+  casual: "background:var(--li-purple,#7c3aed);color:var(--li-purple-fg,#fff);border-color:var(--li-purple,#7c3aed);",
+  pro:    "background:var(--li-blue-fill,#0a66c2);color:var(--li-blue-fg,#fff);border-color:var(--li-blue-fill,#0a66c2);",
+};
 
 // Drawn icons for the ✨ popup header (one stroke weight, follow text color).
 const ICON_REFRESH = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg>';
@@ -2152,8 +2762,9 @@ const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" 
 
 // opts.context = "invite" → Connect → "Add a note" box (no chat history,
 // LinkedIn's own character limit, popup opens above the note box).
-function toggleAiPopup(editable, spark, opts) {
+async function toggleAiPopup(editable, spark, opts) {
   opts = opts || {};
+  const prefs = await loadAiPrefs();
   // Theme variables live in the shared stylesheet, which profile pages inject on
   // their own; chats on /messaging or the feed need it too or the popup stays light.
   try { injectStyles(); applyTheme(); } catch (e) { /* inline fallbacks still apply */ }
@@ -2182,7 +2793,8 @@ function toggleAiPopup(editable, spark, opts) {
   box.className = "li-ai-popup";
   box.style.cssText = AI_BOX_CSS;
   // action/draft set = "Your draft" rewrite view; notice = one-off hint line
-  const state = { tone: editable._liTone || "casual", action: "", draft: "", notice: "" };
+  const state = { tone: cleanTone(editable._liTone || defaultAiTone(prefs)), action: "", draft: "", notice: "",
+                  role: prefs.senderRole || "" };
   const maxChars = invite ? ((editable.maxLength > 0 && editable.maxLength) || 300) : 300;
   // cache: key -> {list} | {error}; pending: keys with a request in flight.
   // Repaints for an unchanged thread never hit the API again.
@@ -2206,45 +2818,79 @@ function toggleAiPopup(editable, spark, opts) {
       const heading = state.action
         ? '<div style="font-size:11px;font-weight:700;color:var(--li-muted,#6b7280);margin:2px 0;">Rewrites of your draft — click to replace it</div>'
         : "";
-      body = heading + painLine + entry.list.map((s) => '<button type="button" class="li-ai-sug" style="' + AI_ITEM_CSS + '">' + escHtml(s) + "</button>").join("");
+      // The AI's read of where the chat stands, so you can see why it suggests what it does
+      const lineCss = "margin:0 0 6px;padding:6px 10px;border-radius:8px;background:var(--li-surface-2,#f3f4f6);color:var(--li-fg-2,#374151);font-size:11.5px;line-height:1.4;";
+      const analysisLine = entry.analysis && !state.action
+        ? '<div data-role="analysis" style="' + lineCss + '"><strong>' +
+          (invite ? "Why this person:" : "Conversation (" + n + " message" + (n === 1 ? "" : "s") + " read):") +
+          "</strong> " + escHtml(entry.analysis) + "</div>"
+        : "";
+      // Invite notes: what they were personalised from, and whether the AI or the template wrote them
+      const basisLine = invite && !state.action && (entry.basis || []).length
+        ? '<div data-role="basis" style="margin:0 0 6px;font-size:11px;line-height:1.4;color:var(--li-muted,#6b7280);">Personalized from: ' +
+          escHtml(entry.basis.join(" · ")) + "</div>"
+        : "";
+      const noticeLine = entry.source === "template" && entry.notice
+        ? '<div data-role="notice" role="status" style="margin:0 0 6px;font-size:11px;line-height:1.4;color:var(--li-warn-fg,#92400e);">Template — ' +
+          escHtml(entry.notice) + "</div>"
+        : "";
+      body = heading + analysisLine + basisLine + noticeLine + painLine +
+        entry.list.map((s) => '<button type="button" class="li-ai-sug" style="' + AI_ITEM_CSS + '">' + escHtml(s) + "</button>").join("");
     } else if (entry && entry.error) {
       body = '<div role="alert" style="padding:10px 12px;border:1px solid #fca5a5;border-radius:8px;background:rgba(239,68,68,.08);color:var(--li-fg,#111827);font-size:12.5px;line-height:1.45;">' +
         "⚠️ AI unavailable — " + escHtml(entry.error) +
         '<div style="margin-top:8px;"><button type="button" data-act="retry" style="' + AI_MINI_CSS + '">Retry</button></div></div>';
     } else {
       const loading = state.action ? "✍️ Rewriting your draft…"
+        : record.harvesting ? "⏳ Loading the earlier messages of this conversation…"
         : (!n && state.tone === "pro") ? "🔎 Reading their recent posts to find the real pain point… (first time can take up to a minute)"
+        : n ? `✨ Reading ${n} message${n === 1 ? "" : "s"} and writing replies…`
         : "✨ Generating suggestions…";
       body = '<div role="status" style="padding:14px 12px;font-size:12.5px;color:var(--li-muted,#6b7280);">' + loading + "</div>";
     }
+    // Tone belongs to the message being written, not to a saved setting: pick it
+    // here and the suggestions below are rewritten in it.
+    const toneRow =
+      '<div role="group" aria-label="Message tone" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:8px 0 0;font-size:11px;color:var(--li-muted,#6b7280);">' +
+      '<span style="' + AI_ROW_LABEL_CSS + '">Tone:</span>' +
+      TONES.map(([k, label, hint]) => '<button type="button" data-tone="' + k + '" title="' + escAttr(hint) + '" aria-pressed="' + (state.tone === k) +
+        '" style="' + AI_MINI_CSS + (state.tone === k ? TONE_ON_CSS[k] : "") + '">' + label + "</button>").join("") +
+      "</div>";
     const draftRow =
-      '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:8px 0 2px;font-size:11px;color:var(--li-muted,#6b7280);">' +
-      '<span style="margin-right:2px;">Your draft:</span>' +
+      '<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:6px 0 2px;font-size:11px;color:var(--li-muted,#6b7280);">' +
+      '<span style="' + AI_ROW_LABEL_CSS + '">Your draft:</span>' +
       DRAFT_ACTIONS.map(([k, label]) => '<button type="button" data-draft="' + k + '" aria-pressed="' + (state.action === k) + '" style="' + AI_MINI_CSS +
         (state.action === k ? "background:#7c3aed;color:#fff;border-color:#7c3aed;" : "") + '">' + label + "</button>").join("") +
       (state.action ? '<button type="button" data-act="back" style="' + AI_MINI_CSS + '">← Suggestions</button>' : "") +
       (state.notice ? '<span role="status" style="flex-basis:100%;color:var(--li-warn-fg,#92400e);margin-top:2px;">' + escHtml(state.notice) + "</span>" : "") +
       "</div>";
-    box.innerHTML =
+    const html =
       '<div style="position:sticky;top:-12px;margin:-12px -12px 0;padding:12px 12px 4px;background:var(--li-bg,#fff);display:flex;justify-content:space-between;align-items:center;gap:8px;border-radius:10px 10px 0 0;z-index:2;box-shadow:0 1px 0 var(--li-border,#e5e7eb);">' +
       '<span style="font-size:11px;font-weight:800;letter-spacing:.6px;color:var(--li-blue,#0a66c2);">' + (invite ? "AI NOTE" : "AI SUGGESTIONS") + "</span>" +
       '<span style="display:flex;gap:4px;align-items:center;">' +
-      '<button type="button" data-tone="casual" aria-pressed="' + (state.tone === "casual") + '" style="' + AI_MINI_CSS + (state.tone === "casual" ? "background:#7c3aed;color:#fff;border-color:#7c3aed;" : "") + '">Casual</button>' +
-      '<button type="button" data-tone="pro" aria-pressed="' + (state.tone === "pro") + '" style="' + AI_MINI_CSS + (state.tone === "pro" ? "background:#0a66c2;color:#fff;border-color:#0a66c2;" : "") + '">Pro</button>' +
+      (state.role ? '<span title="' + escAttr("Sending as: " + state.role + " — change it from the extension icon → My pitch") + '" style="max-width:132px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;color:var(--li-muted,#6b7280);padding:2px 4px;">as ' + escHtml(state.role) + "</span>" : "") +
       '<button type="button" data-act="refresh" title="Generate new AI suggestions" aria-label="Generate new AI suggestions" style="' + AI_MINI_CSS + 'padding:4px 8px;display:inline-flex;align-items:center;">' + ICON_REFRESH + "</button>" +
       '<button type="button" data-act="close" title="Close" aria-label="Close AI suggestions" style="background:none;border:none;padding:4px;border-radius:6px;cursor:pointer;color:var(--li-muted,#6b7280);display:inline-flex;align-items:center;">' + ICON_CLOSE + "</button>" +
       "</span></div>" +
+      toneRow +
       draftRow +
       '<div style="height:4px;"></div>' +
       body;
     state.notice = "";
+    // The page tick repaints often: an unchanged popup is left alone, so the reader's
+    // scroll position (and focus) survive; the same view keeps its scroll after a rebuild.
+    if (html === record.lastHtml) { record.place(); return; }
+    const keepScroll = record.lastViewKey === v.cacheKey ? box.scrollTop : 0;
+    box.innerHTML = html;
+    record.lastHtml = html;
+    record.lastViewKey = v.cacheKey;
     box.querySelector('[data-act="close"]').onclick = removeBox;
     box.querySelector('[data-act="refresh"]').onclick = (e) => { e.preventDefault(); paint({ force: true }); };
     const retry = box.querySelector('[data-act="retry"]');
     if (retry) retry.onclick = (e) => { e.preventDefault(); paint({ force: true }); };
     const back = box.querySelector('[data-act="back"]');
     if (back) back.onclick = (e) => { e.preventDefault(); state.action = ""; state.draft = ""; paint(); };
-    box.querySelectorAll("[data-tone]").forEach((b) => { b.onclick = (e) => { e.preventDefault(); state.tone = b.dataset.tone === "pro" ? "pro" : "casual"; paint(); }; });
+    box.querySelectorAll("[data-tone]").forEach((b) => { b.onclick = (e) => { e.preventDefault(); if (state.tone === b.dataset.tone) return; state.tone = rememberAiTone(b.dataset.tone); paint(); }; });
     box.querySelectorAll("[data-draft]").forEach((b) => {
       b.onclick = (e) => {
         e.preventDefault();
@@ -2261,6 +2907,7 @@ function toggleAiPopup(editable, spark, opts) {
       el.onclick = () => { insertIntoComposer(editable, el.innerText); };   // keep popup open (tone/list stay usable)
     });
     record.place();
+    box.scrollTop = keepScroll;
   };
 
   // opts.force = drop the cached answer (↻ / Retry); opts.debounce = live refresh,
@@ -2268,12 +2915,13 @@ function toggleAiPopup(editable, spark, opts) {
   const paint = (opts) => {
     opts = opts || {};
     const history = invite ? [] : scrapeChatMessages(editable, AI_HISTORY_LIMIT);
-    const fullName = invite ? inviteFullName(editable) : chatFullName(editable, history);
-    const first = invite ? (fullName.split(/\s+/)[0] || "there") : chatFirstName(editable, history);
+    const target = invite ? (record.target || (record.target = inviteTarget(editable))) : null;
+    const fullName = invite ? target.fullName : chatFullName(editable, history);
+    const first = invite ? target.first : chatFirstName(editable, history);
     editable._liTone = state.tone;
     const histKey = history.map((m) => m.sender + ":" + m.text).join("|");
     box.dataset.histKey = histKey;
-    const profileUrl = invite ? inviteProfileUrl(fullName) : chatProfileUrl(editable, first);
+    const profileUrl = invite ? target.url : chatProfileUrl(editable, first);
     if (editable._liLoggedKey !== histKey) {
       editable._liLoggedKey = histKey;
       try { console.log("[LI-AI] scraped chat history (" + history.length + "):", history.map((m) => "[" + (m.sender || "?") + "] " + m.text)); } catch (e) {}
@@ -2281,13 +2929,14 @@ function toggleAiPopup(editable, spark, opts) {
     }
     // Person + mode are part of the key: an empty history ("") must not reuse another chat's openers.
     const act = state.action ? state.action + ":" + state.draft : "";
-    const cacheKey = [record.context, first, profileUrl, histKey, state.tone, act].join("|");
+    const cacheKey = [record.context, first, profileUrl, histKey, state.tone, state.role, act].join("|");
     if (opts.force && !record.pending[cacheKey]) delete record.cache[cacheKey];
     record.view = { history, first, cacheKey, tone: state.tone, profileUrl };
     render();
+    if (record.harvesting) return;   // fetch once the earlier messages have loaded
     if (record.cache[cacheKey] || record.pending[cacheKey]) return;
     clearTimeout(record.fetchTimer);
-    const req = { history, first, fullName, tone: state.tone, profileUrl, context: record.context, maxChars,
+    const req = { history, first, fullName, target, tone: state.tone, role: state.role, profileUrl, context: record.context, maxChars,
                   draft: state.action ? state.draft : "", action: state.action };
     record.fetchTimer = setTimeout(() => fetchAiSuggestions(record, req, cacheKey, render), opts.debounce ? 1500 : 0);
   };
@@ -2297,7 +2946,15 @@ function toggleAiPopup(editable, spark, opts) {
   // button (or the composer being removed) closes it.
   openSpark.push(record);
   document.body.appendChild(box);
+  if (!invite) record.harvesting = true;
   paint();                      // fill content FIRST so placement measures real height
+  if (!invite) {
+    harvestOlderMessages(editable).then((added) => {
+      record.harvesting = false;
+      if (added) console.log("[LI-AI] loaded " + added + " earlier message(s) from this thread");
+      if (box.isConnected) paint();
+    });
+  }
   try { spark.style.background = "rgba(124,58,237,.15)"; } catch (e) {}
 }
 
@@ -2323,7 +2980,7 @@ function makeSparkButton() {
   spark.type = "button";
   spark.className = "li-spark-btn";
   spark.textContent = "✨";
-  spark.title = "AI Suggestions — based on last 5 messages";
+  spark.title = `AI Suggestions — reads this conversation (up to ${AI_HISTORY_LIMIT} messages)`;
   spark.setAttribute("aria-label", "AI Suggestions");
   spark.style.cssText = SPARK_CSS;
   spark.onmouseenter = () => { spark.style.background = "rgba(0,0,0,.08)"; };
@@ -2465,28 +3122,41 @@ function injectComposeSuggestions() {
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────
+// Buttons and panels belong to one person. Opening an overlay (Contact info)
+// keeps them; moving to someone else or off the profile removes them.
+let _navState = "";
+function handleNavigation() {
+  const state = (isProfilePage() ? "profile:" : "other:") + (currentProfileSlug() || location.pathname);
+  if (state === _navState) return;
+  const first = !_navState;
+  _navState = state;
+  if (first) return;
+  for (const id of ["li-ai-analyze-btn", "li-icp-btn", "li-ai-panel", "li-icp-panel"]) document.getElementById(id)?.remove();
+}
+
+// LinkedIn mutates the DOM constantly: batch our work into at most one pass
+// every 400 ms instead of re-scanning the page on every mutation.
+let _tickTimer = 0, _lastTick = 0;
+function runTick() {
+  _tickTimer = 0;
+  _lastTick = Date.now();
+  try { handleNavigation(); } catch (e) { /* ignore */ }
+  try { addAIButton(); } catch (e) { /* retried next tick */ }
+  try { injectComposeSuggestions(); } catch (e) { /* never break chat */ }
+}
+function scheduleTick() {
+  if (_tickTimer) return;
+  _tickTimer = setTimeout(runTick, Math.max(0, 400 - (Date.now() - _lastTick)));
+}
+
 watchTheme();
 applyTheme();
-setTimeout(() => { addAIButton(); injectComposeSuggestions(); }, 1500);
-setInterval(() => { addAIButton(); injectComposeSuggestions(); }, 3000);
-
-let lastUrl = location.href;
-const observer = new MutationObserver(() => {
-  if (location.href !== lastUrl) {
-    lastUrl = location.href;
-    document.getElementById("li-ai-analyze-btn")?.remove();
-    document.getElementById("li-icp-btn")?.remove();
-    document.getElementById("li-ai-panel")?.remove();
-    document.getElementById("li-icp-panel")?.remove();
-    setTimeout(addAIButton, 1500);
-  } else {
-    addAIButton();
-    injectComposeSuggestions();
-  }
-});
-observer.observe(document.body, { childList: true, subtree: true });
+setTimeout(runTick, 1500);
+setInterval(scheduleTick, 3000);
+new MutationObserver(scheduleTick).observe(document.body, { childList: true, subtree: true });
 
 watchSends();
+watchConnectClicks();
 
 let _focusSparkTimer = null;
 document.addEventListener("focusin", (e) => {

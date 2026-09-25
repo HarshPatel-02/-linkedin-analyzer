@@ -105,16 +105,29 @@ $("clear-leads").onclick = () => {
 };
 
 // ─── My pitch (backend: /pitch-config → pitch_config.json) ────────────────────
+// A sleeping Render server can take ~30-50s to answer; don't wait forever.
+async function fetchWithTimeout(url, init, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms || 45000);
+  try { return await fetch(url, Object.assign({}, init, { signal: ctrl.signal })); }
+  catch (e) { throw new Error(e && e.name === "AbortError" ? "timed out — the server may be waking up, try again" : "backend unreachable"); }
+  finally { clearTimeout(timer); }
+}
+
+const pitchSaveBtn = () => document.querySelector('#pitch-form button[type="submit"]');
+
 async function loadPitch() {
   $("pitch-status").textContent = "Loading…";
+  pitchSaveBtn().disabled = true;   // saving half-loaded fields would replace your pitch
   try {
-    const resp = await fetch(API_BASE + "/pitch-config");
+    const resp = await fetchWithTimeout(API_BASE + "/pitch-config");
     if (!resp.ok) throw new Error("server error " + resp.status);
     const pitch = await resp.json();
     PITCH_FIELDS.forEach((k) => { $("p-" + k).value = pitch[k] || ""; });
     $("pitch-status").textContent = "";
+    pitchSaveBtn().disabled = false;
   } catch (e) {
-    $("pitch-status").textContent = "⚠️ Backend not running — start uvicorn to edit the pitch.";
+    $("pitch-status").textContent = "⚠️ Couldn't load your pitch (" + e.message + "). Reopen this tab in ~30s.";
   }
 }
 
@@ -123,14 +136,27 @@ $("pitch-form").onsubmit = async (e) => {
   const body = {};
   PITCH_FIELDS.forEach((k) => { body[k] = $("p-" + k).value.trim(); });
   $("pitch-status").textContent = "Saving…";
+  pitchSaveBtn().disabled = true;
   try {
-    const resp = await fetch(API_BASE + "/pitch-config", {
+    const resp = await fetchWithTimeout(API_BASE + "/pitch-config", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     if (!resp.ok) throw new Error("server error " + resp.status);
-    $("pitch-status").textContent = "✅ Saved — next ✨ suggestions use it.";
+    // Keep the ✨ Setup preferences in step: role = "Who you are". Tone is not
+    // saved here — each AI note / AI suggestion picks its own tone as you write.
+    chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
+      const s = Object.assign({}, (r && r[LI_SETTINGS_KEY]) || {}, {
+        senderRole: body.who || "",
+        aiSetupDone: Date.now(),
+      });
+      delete s.aiTone;                       // drop the retired "Message tone" setting
+      chrome.storage.local.set({ [LI_SETTINGS_KEY]: s });
+    });
+    $("pitch-status").textContent = "✅ Saved — the next AI suggestions use it.";
   } catch (err) {
-    $("pitch-status").textContent = "❌ " + err.message;
+    $("pitch-status").textContent = "❌ Not saved: " + err.message;
+  } finally {
+    pitchSaveBtn().disabled = false;
   }
 };
 

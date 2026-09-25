@@ -48,14 +48,14 @@
   button.btn.danger:hover { border-color: var(--bad); color: var(--bad); }
   label { display: block; font-weight: 700; font-size: 12px; margin: 10px 0 3px; color: var(--fg-2); }
   label span { font-weight: 400; color: var(--muted); }
-  input, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px;
+  input, textarea, select { width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px;
                     background: var(--input); color: var(--fg); font: inherit; }
   textarea { min-height: 54px; resize: vertical; }
   input[type=number] { width: 64px; }
   .status { min-height: 18px; margin-top: 8px; font-size: 12px; color: var(--muted); }
   /* Keyboard focus, fields, scrollbar, selection — themed, not browser defaults */
-  button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
-  input:focus, textarea:focus { border-color: var(--purple); }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+  input:focus, textarea:focus, select:focus { border-color: var(--purple); }
   main { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   main::-webkit-scrollbar { width: 6px; }
   main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -95,9 +95,9 @@
     </section>
 
     <section id="tab-pitch" hidden>
-      <div class="muted">Used by every ✨ AI suggestion. Saved to <code>pitch_config.json</code> on your server.</div>
+      <div class="muted">Set this up once. It applies to every AI note and suggestion — chat ✨ replies, connection notes and the Suggested outreach on score panels. Tone is picked per message, on the AI note itself.</div>
       <form id="pitch-form">
-        <label for="p-who">Who you are</label>
+        <label for="p-who">Your position / role <span>(you, the sender)</span></label>
         <input id="p-who" placeholder="Founder of a healthcare IT company">
         <label for="p-expertise">Your expertise</label>
         <input id="p-expertise" placeholder="healthcare tech experts">
@@ -109,7 +109,7 @@
         <textarea id="p-casual_opener"></textarea>
         <div class="row" style="margin-top:10px;">
           <span class="status" id="pitch-status"></span>
-          <button type="submit" class="btn primary">💾 Save pitch</button>
+          <button type="submit" class="btn primary">💾 Save</button>
         </div>
       </form>
     </section>
