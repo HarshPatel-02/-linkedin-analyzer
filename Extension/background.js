@@ -46,7 +46,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ─── Admin panel (LeadAgent) sync ──────────────────────────────────────────────
 // popup → {type:"li-admin", action:"status"|"sync"} → LeadAgent backend.
 // Runs here (not in the popup) so host_permissions apply and CORS never blocks.
-const ADMIN_API = "http://localhost:8001/api";
+const ADMIN_API = "http://127.0.0.1:8001/api";
+
+// The admin panel upserts by the profile's /in/<slug>, so one lead or all of them
+// go to the same endpoint in the same shape.
+const syncBody = (leads) => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leads }) });
 
 async function adminFetch(path, init) {
   const ctrl = new AbortController();
@@ -58,7 +62,7 @@ async function adminFetch(path, init) {
     return data;
   } catch (e) {
     throw new Error(e && e.name === "AbortError" ? "admin backend timed out"
-      : (e.message || "admin backend unreachable — is it running on localhost:8001?"));
+      : (e.message || "admin backend unreachable — start it: uvicorn app.main:app --port 8001"));
   } finally { clearTimeout(timer); }
 }
 
@@ -72,9 +76,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const r = await new Promise((res) => chrome.storage.local.get([LI_LEADS_KEY], res));
         const leads = Object.values(r[LI_LEADS_KEY] || {});
         if (!leads.length) { sendResponse({ ok: false, error: "No leads logged yet — analyze a profile first." }); return; }
-        sendResponse({ ok: true, data: await adminFetch("/extension/sync", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leads }),
-        }) });
+        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(leads) }) });
+      } else if (msg.action === "push") {
+        // One freshly scored person, sent the moment content.js saves the score.
+        // Fire-and-forget: the page never waits for this and never shows its errors,
+        // so a stopped admin panel just means "sync it later" (the popup button).
+        const r = await new Promise((res) => chrome.storage.local.get([LI_LEADS_KEY], res));
+        const leads = r[LI_LEADS_KEY] || {};
+        const lead = leads[liFindLeadKey(leads, msg.url, msg.name) || ""];
+        if (!lead || !lead.name) { sendResponse({ ok: false, error: "nothing to push" }); return; }
+        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody([lead]) }) });
       } else {
         sendResponse({ ok: false, error: "unknown admin action" });
       }
