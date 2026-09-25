@@ -44,8 +44,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ─── Admin panel (LeadAgent) sync ──────────────────────────────────────────────
-// popup → {type:"li-admin", action:"status"|"sync"} → LeadAgent backend.
-// Runs here (not in the popup) so host_permissions apply and CORS never blocks.
+// popup → {type:"li-admin", action:"status"|"sync"} and content.js → action:"push"
+// → LeadAgent backend. Runs here (not in the page or popup) so host_permissions
+// apply and CORS never blocks.
 const ADMIN_API = "http://127.0.0.1:8001/api";
 
 // The admin panel upserts by the profile's /in/<slug>, so one lead or all of them
