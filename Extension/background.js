@@ -1,6 +1,6 @@
 importScripts("leads.js");
 
-const API_BASE = "http://127.0.0.1:8765";
+const API_BASE = "https://linkedin-analyzer-90ne.onrender.com";
 
 // Alarms can be cleared on browser restart → (re)create on install and startup.
 function startFollowupAlarm() {
