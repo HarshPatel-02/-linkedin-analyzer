@@ -49,7 +49,6 @@ class ProfileData(BaseModel):
     projects:           str   = ""
     activity:           str   = ""
     activity_url:       str   = ""
-    activity_date:      str   = ""   # ISO date of the newest activity — the extension recomputes "X ago" from it
     followers:          int   = 0
     connections:        int   = 0
     mutual_connections: int   = 0
@@ -79,11 +78,6 @@ class ProfileData(BaseModel):
     max_mutuals:        int   = 10
     score_raw:          int   = 0
     score_max:          int   = 100
-    # What the score was based on (shown in the panel, used for outreach suggestions)
-    signal_hits:          dict      = {}   # {"hiring": "we're hiring", ...} — lists that matched
-    completeness_missing: list[str] = []   # e.g. ["about", "skills"]
-    posts_analyzed:       int       = 0
-    data_source:          str       = ""   # "apify" | "form"
 
 class IcpConfig(BaseModel):
     """ICP keywords saved from the extension form → icp_config.json.
@@ -136,40 +130,6 @@ class SuggestRequest(BaseModel):
     icp_score:       Optional[int] = None   # saved ICP / Activity scores for this person
     activity_score:  Optional[int] = None
     activity_label:  str = ""
-    awaiting_reply_days: Optional[int] = None   # my last message unanswered for N days → follow-up
-    # Connect → "Add a note": what the extension knows about this person
-    country:          str = ""
-    about:            str = ""
-    activity:         str = ""   # e.g. 'Last posted 3 days ago — "post snippet…"'
-    icp_breakdown:    dict = {}
-    engagement_label: str = ""
-    signal_hits:      dict = {}
-    sender_role:      str = ""   # Setup: who "I" am — overrides the pitch "who"
-    pain_point:       str = ""   # from the lead log (earlier ✨ analysis of their posts)
-    prior_contact:    str = ""   # earlier messages exchanged with them, if any
-
-
-class OutreachRequest(BaseModel):
-    """Profile + ICP / Activity analysis → a connection note and a first message."""
-    name:             str = ""
-    first_name:       str = ""
-    headline:         str = ""
-    position:         str = ""
-    current_company:  str = ""
-    country:          str = ""
-    about:            str = ""
-    activity:         str = ""   # e.g. 'Last posted 3 days ago — "post snippet…"'
-    profile_url:      str = ""
-    icp_score:        Optional[int] = None
-    icp_breakdown:    dict = {}  # {"Industry Match": {"score": 35, "max": 35, "reason": "Exact match (hospital)"}, ...}
-    activity_score:   Optional[int] = None
-    activity_label:   str = ""
-    engagement_label: str = ""
-    signal_hits:      dict = {}  # {"hiring": "we're hiring", ...}
-    tone:             str = "casual"   # "casual" | "pro"
-    sender_role:      str = ""
-    pain_point:       str = ""
-    prior_contact:    str = ""
 
 
 class PitchConfig(BaseModel):
@@ -182,11 +142,9 @@ class PitchConfig(BaseModel):
 
 
 class IcpScore(BaseModel):
-    name:               str   = ""
+    name:               str   = ""   
     country:            str   = ""
     position:           str   = ""
-    headline:           str   = ""
-    industry:           str   = ""
     about:              str   = ""
     current_company_name: str =""
     current_company:    str   = ""
