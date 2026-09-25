@@ -53,6 +53,38 @@ const ADMIN_API = "http://127.0.0.1:8001/api";
 // go to the same endpoint in the same shape.
 const syncBody = (leads) => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leads }) });
 
+const LI_NA_RE = /^(not specified|unknown|no activity data|no recent activity|no projects)$/i;
+const liVal = (...vals) => {
+  for (const v of vals) {
+    const s = String(v == null ? "" : v).trim();
+    if (s && !LI_NA_RE.test(s)) return s;
+  }
+  return "";
+};
+
+// A lead record holds only what the lead log tracks, but the full analysis for the
+// same person is already saved under "liScore:<profile url>" (role, country, About,
+// latest activity). Merging it means leads logged before those fields were tracked
+// still reach the admin complete — without re-analyzing anyone.
+async function enrichLeads(leads) {
+  const all = await new Promise((res) => chrome.storage.local.get(null, res));
+  const scores = Object.entries(all || {}).filter(([k, v]) => k.startsWith("liScore:") && v);
+  return leads.map((lead) => {
+    const slug = liLeadSlug(lead.url) || liLeadSlug(lead.name);
+    const hit = slug ? scores.find(([k]) => liLeadSlug(k) === slug) : null;
+    const a = (hit && hit[1].activity && hit[1].activity.data) || {};
+    return Object.assign({}, lead, {
+      name: liVal(lead.name, a.name),
+      headline: liVal(lead.headline, a.headline),
+      position: liVal(lead.position, a.position, a.headline),
+      company: liVal(lead.company, a.current_company),
+      country: liVal(lead.country, a.country),
+      about: liVal(lead.about, a.about).slice(0, 1200),
+      activity: liVal(lead.activity, a.activity),
+    });
+  });
+}
+
 async function adminFetch(path, init) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15000);
@@ -77,7 +109,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const r = await new Promise((res) => chrome.storage.local.get([LI_LEADS_KEY], res));
         const leads = Object.values(r[LI_LEADS_KEY] || {});
         if (!leads.length) { sendResponse({ ok: false, error: "No leads logged yet — analyze a profile first." }); return; }
-        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(leads) }) });
+        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads(leads)) }) });
       } else if (msg.action === "push") {
         // One freshly scored person, sent the moment content.js saves the score.
         // Fire-and-forget: the page never waits for this and never shows its errors,
@@ -85,8 +117,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const r = await new Promise((res) => chrome.storage.local.get([LI_LEADS_KEY], res));
         const leads = r[LI_LEADS_KEY] || {};
         const lead = leads[liFindLeadKey(leads, msg.url, msg.name) || ""];
-        if (!lead || !lead.name) { sendResponse({ ok: false, error: "nothing to push" }); return; }
-        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody([lead]) }) });
+        if (!lead || !(lead.name || lead.url)) { sendResponse({ ok: false, error: "nothing to push" }); return; }
+        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads([lead])) }) });
       } else {
         sendResponse({ ok: false, error: "unknown admin action" });
       }
