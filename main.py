@@ -2,18 +2,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import traceback
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # MUST run before the service imports below: they read .env values at import time
 load_dotenv()
 
 from models import (AnalyzeRequest, IcpScore, ProfileData, IcpConfig, SuggestRequest, PitchConfig,
-                    OutreachRequest, LeadMessageRequest)
+                    OutreachRequest, LeadMessageRequest, CollectRequest)
 from services.actor_service import run_apify_actor, run_posts_actor, map_apify_to_profile
 from services.ai_service import (generate_chat_suggestions, generate_outreach, generate_lead_message,
                                  get_pitch_config, save_pitch_config)
 from services.icp_service import calculate_icp, run_company_actor, get_icp_config, save_icp_config
-from services.analysis_service import analyze_profile
+from services.analysis_service import analyze_profile, activity_block
 from services.scoring_service import (compute_score, newest_post, get_activity_points, save_activity_points,
                                       get_signal_keywords, save_signal_keywords)
 
@@ -195,6 +196,80 @@ async def profiles_analyze(data: AnalyzeRequest):
                 "collection_notes": notes,
                 "profile": profile.model_dump(include=set(ProfileData.model_fields) - {"timestamp"}),
                 **result}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+@app.post("/collect")
+async def collect(data: CollectRequest):
+    """Everything knowable about one LinkedIn profile, with no ICP scoring.
+
+    The admin backend owns the ICP rules and the database; this service owns the
+    LinkedIn side. It returns the profile, the posts, the company (including the
+    employee count, which a profile page never shows) and the activity score, plus
+    an explicit list of what could not be collected - so a missing field is never
+    mistaken for a zero.
+    """
+    url = (data.profile_url or "").strip()
+    if not url:
+        return {"success": False, "data_available": False, "missing_fields": ["profile_url"],
+                "message": "A profile URL is required to collect anything."}
+
+    notes: list = []
+    apify_data: dict = {}
+    posts_data: list = []
+    company: dict = {}
+    try:
+        apify_task = asyncio.to_thread(run_apify_actor, url)
+        posts_task = asyncio.to_thread(run_posts_actor, url, data.max_posts, notes)
+        company_task = asyncio.to_thread(run_company_actor, url)
+        apify_data, posts_data, company = await asyncio.gather(
+            apify_task, posts_task, company_task, return_exceptions=False)
+    except Exception as exc:
+        # A failed fetch is reported, never disguised as an empty profile.
+        notes.append(f"profile fetch failed: {type(exc).__name__}: {exc}")
+
+    try:
+        if apify_data:
+            profile = map_apify_to_profile(apify_data, url, posts_data)
+        else:
+            allowed = set(ProfileData.model_fields.keys())
+            profile = ProfileData(**{k: v for k, v in (data.scraped or {}).items() if k in allowed})
+            profile.profileUrl = profile.profileUrl or url
+            for key, value in compute_score(profile, {}, posts_data).items():
+                setattr(profile, key, value)
+
+        # map_apify_to_profile never sets a headline, and the roles rules match on it.
+        # Prefer the fetched headline, then whatever the page showed.
+        if not (profile.headline or "").strip():
+            profile.headline = (company.get("headline") or (data.scraped or {}).get("headline") or "").strip()
+        if not (profile.position or "").strip():
+            profile.position = profile.headline
+        # A profile page never shows these; the company lookup does.
+        if company.get("current_company_industry"):
+            profile.industry = company["current_company_industry"]
+
+        score = compute_score(profile, apify_data, posts_data)
+        act = activity_block(profile, apify_data, posts_data, score)
+        missing = [name for name, value in (
+            ("company_employee_count", company.get("current_company_employee_count")),
+            ("company_industry", company.get("current_company_industry")),
+        ) if not value]
+
+        return {
+            "success": True,
+            "data_available": bool(apify_data or data.scraped),
+            "collected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "profile": profile.model_dump(include=set(ProfileData.model_fields) - {"timestamp"}),
+            "company": company,
+            "activity": act,
+            "activity_breakdown": {k: score[k] for k in score if k.startswith(("score_", "max_", "avg_", "posts_"))},
+            "activity_points": get_activity_points(),
+            "posts_analyzed": act.get("posts_analyzed", 0),
+            "collection_notes": notes,
+            "missing_fields": missing,
+        }
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))
