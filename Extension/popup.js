@@ -1,4 +1,4 @@
-const API_BASE = "https://linkedin-analyzer-90ne.onrender.com";
+let API_BASE = LI_API_DEFAULT;   // replaced by the saved setting on load
 const PITCH_FIELDS = ["who", "expertise", "offer", "services", "casual_opener"];
 
 const $ = (id) => document.getElementById(id);
@@ -23,7 +23,7 @@ document.querySelectorAll("nav [data-tab]").forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll("nav [data-tab]").forEach((x) => x.classList.toggle("on", x === b));
     document.querySelectorAll("main section").forEach((sec) => { sec.hidden = sec.id !== "tab-" + b.dataset.tab; });
-    if (b.dataset.tab === "pitch") loadPitch();
+    if (b.dataset.tab === "pitch") loadApiBase(loadPitch);
   };
 });
 
@@ -139,6 +139,44 @@ $("admin-sync").onclick = async () => {
 };
 document.querySelector('nav [data-tab="leads"]').addEventListener("click", () => { adminStatus(); });
 
+// ─── Backend URL ──────────────────────────────────────────────────────────────
+// Saved with the other settings and read by background.js on every request, so a
+// local server and the hosted one are one field apart.
+function loadApiBase(cb) {
+  chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
+    const settings = (r && r[LI_SETTINGS_KEY]) || {};
+    API_BASE = liApiBase(settings);
+    $("api-base").value = settings.apiBase || "";
+    $("api-base").placeholder = LI_API_DEFAULT;
+    if (cb) cb();
+  });
+}
+
+async function saveApiBase(url) {
+  const clean = liCleanApiBase(url);
+  if (url.trim() && !clean) { $("api-status").textContent = "❌ Not a URL (http://… or https://…)"; return; }
+  chrome.storage.local.get([LI_SETTINGS_KEY], async (r) => {
+    const settings = Object.assign({}, (r && r[LI_SETTINGS_KEY]) || {}, { apiBase: clean });
+    chrome.storage.local.set({ [LI_SETTINGS_KEY]: settings }, async () => {
+      API_BASE = liApiBase(settings);
+      $("api-base").value = clean;
+      $("api-status").textContent = "Testing " + API_BASE + "…";
+      try {
+        const resp = await fetchWithTimeout(API_BASE + "/health", {}, 12000);
+        const data = await resp.json().catch(() => ({}));
+        $("api-status").textContent = resp.ok && data.status === "ok"
+          ? "✅ Connected to " + API_BASE
+          : "⚠️ Reached " + API_BASE + " but it did not answer /health";
+      } catch (e) {
+        $("api-status").textContent = "❌ " + API_BASE + " — " + e.message;
+      }
+    });
+  });
+}
+
+$("api-save").onclick = () => saveApiBase($("api-base").value);
+$("api-hosted").onclick = () => { $("api-base").value = LI_API_HOSTED; saveApiBase(LI_API_HOSTED); };
+
 // ─── My pitch (backend: /pitch-config → pitch_config.json) ────────────────────
 // A sleeping Render server can take ~30-50s to answer; don't wait forever.
 async function fetchWithTimeout(url, init, ms) {
@@ -196,3 +234,4 @@ $("pitch-form").onsubmit = async (e) => {
 };
 
 render();
+loadApiBase();

@@ -6,6 +6,22 @@
 //          theirLastBeforeSend, lastReplyAt, lastTheirText, followupDismissedAt,
 //          createdAt, updatedAt }
 
+// ─── Backend ──────────────────────────────────────────────────────────────────
+// Which analyzer backend to talk to. Editable in the toolbar popup (Settings ->
+// Backend URL) and stored with the other settings, so switching between a local
+// server and the hosted one needs no code change and no rebuild.
+const LI_API_DEFAULT = "http://127.0.0.1:8010";
+const LI_API_HOSTED  = "https://linkedin-analyzer-90ne.onrender.com";
+
+function liCleanApiBase(url) {
+  const s = String(url || "").trim().replace(/\/+$/, "");
+  return /^https?:\/\/[^\s]+$/i.test(s) ? s : "";
+}
+
+function liApiBase(settings) {
+  return liCleanApiBase((settings || {}).apiBase) || LI_API_DEFAULT;
+}
+
 const LI_LEADS_KEY = "liLeads";
 const LI_SETTINGS_KEY = "liSettings";
 const LI_DEFAULT_FOLLOWUP_DAYS = 3;

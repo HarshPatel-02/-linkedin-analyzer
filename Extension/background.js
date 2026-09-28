@@ -1,6 +1,11 @@
 importScripts("leads.js");
 
-const API_BASE = "https://linkedin-analyzer-90ne.onrender.com";
+// Resolved per request from the saved setting, so changing Backend URL in the
+// popup takes effect immediately - no service-worker restart, no rebuild.
+function apiBase() {
+  return new Promise((res) =>
+    chrome.storage.local.get([LI_SETTINGS_KEY], (r) => res(liApiBase((r && r[LI_SETTINGS_KEY]) || {}))));
+}
 
 // Alarms can be cleared on browser restart → (re)create on install and startup.
 function startFollowupAlarm() {
@@ -28,13 +33,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         init.headers = { "Content-Type": "application/json" };
         init.body = JSON.stringify(msg.body);
       }
-      const resp = await fetch(API_BASE + msg.path, init);
+      const base = await apiBase();
+      const resp = await fetch(base + msg.path, init);
       const data = await resp.json().catch(() => ({}));
       sendResponse({ ok: resp.ok, status: resp.status, data });
     } catch (e) {
       const error = e && e.name === "AbortError"
         ? `Timed out after ${Math.round(timeoutMs / 1000)}s — the server may be waking up (Render free tier sleeps when idle) or the scrape is slow. Try again.`
-        : "Backend unreachable at " + API_BASE + " — it may be waking up (Render free tier sleeps when idle), wait ~30s and try again";
+        : "Backend unreachable at " + (await apiBase()) + " — start it, or set Backend URL in the extension popup";
       sendResponse({ ok: false, status: 0, data: {}, error });
     } finally {
       clearTimeout(timer);

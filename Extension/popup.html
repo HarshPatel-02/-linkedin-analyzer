@@ -103,6 +103,18 @@
     </section>
 
     <section id="tab-pitch" hidden>
+      <div class="row" style="border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:10px;">
+        <label for="api-base" style="margin:0;">Backend URL <span>where scores and AI come from</span></label>
+      </div>
+      <input id="api-base" placeholder="http://127.0.0.1:8010" autocomplete="off" spellcheck="false">
+      <div class="row" style="margin:6px 0 12px;">
+        <span class="status" id="api-status"></span>
+        <span>
+          <button type="button" class="btn" id="api-hosted">Use hosted</button>
+          <button type="button" class="btn primary" id="api-save">Save &amp; test</button>
+        </span>
+      </div>
+
       <div class="muted">Set this up once. It applies to every AI note and suggestion — chat ✨ replies, connection notes and the Suggested outreach on score panels. Tone is picked per message, on the AI note itself.</div>
       <form id="pitch-form">
         <label for="p-who">Your position / role <span>(you, the sender)</span></label>
