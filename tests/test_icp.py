@@ -220,3 +220,29 @@ def test_title_deep_in_a_long_about_is_not_claimed():
 
 def test_no_title_data_at_all_is_reported_as_no_data():
     assert icp.score_job_title("", "", "") == (0, "No data")
+
+
+# ─── A headline that is only the person's name ────────────────────────────────
+@pytest.mark.parametrize("headline", [
+    "Kristin Bryce", "Kristin Bryce · 2nd", "Kristin Bryce 2nd", "Kristin Bryce she/her · 3rd",
+])
+def test_name_as_headline_is_ignored_and_about_is_used(headline):
+    """LinkedIn's name row can be scraped as the headline; it holds no job title."""
+    result = calculate_icp({"name": "Kristin Bryce", "headline": headline, "position": headline,
+                            "about": "Founder & CEO of Managed Chaos Innovations."})
+    title = result["breakdown"]["Job Title Match"]
+    assert title["score"] == icp.ICP_POINTS["TIER_1_TITLES"]
+    assert "from About" in title["reason"]
+
+
+def test_a_real_headline_containing_the_name_still_counts():
+    result = calculate_icp({"name": "Kristin Bryce", "headline": "Kristin Bryce, Founder & CEO",
+                            "position": "Kristin Bryce, Founder & CEO"})
+    assert result["breakdown"]["Job Title Match"]["score"] == icp.ICP_POINTS["TIER_1_TITLES"]
+
+
+def test_the_real_headline_scores_tier_1():
+    result = calculate_icp({"name": "Kristin Bryce", "headline": "Founder, CEO, Innovator",
+                            "position": "Founder, CEO, Innovator"})
+    title = result["breakdown"]["Job Title Match"]
+    assert title["score"] == icp.ICP_POINTS["TIER_1_TITLES"] and "from" not in title["reason"]

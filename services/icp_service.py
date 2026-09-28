@@ -349,10 +349,34 @@ def score_keywords(text: str) -> tuple:
     return pts(full, Fraction(1, 3)), reason
 
 
+def _is_just_the_name(text: str, name: str) -> bool:
+    """A "headline" that is only the person's name carries no job title.
+
+    LinkedIn's name row reads "Kristin Bryce · 2nd", and a page scrape can easily
+    hand that back as the headline. Treating it as a headline scores the profile
+    on a string with no title in it, so it is discarded and the real sources
+    (Apify's headline, the About text) are used instead.
+    """
+    if not text or not name:
+        return False
+    a, b = normalize(text), normalize(name)
+    if a == b:
+        return True
+    if a.startswith(b):
+        rest = re.sub(r"(1st|2nd|3rd|premium|verified|he|him|she|her|they|them)", " ", a[len(b):])
+        return not re.sub(r"[^a-z0-9]+", "", rest)
+    return False
+
+
 def calculate_icp(profile: dict) -> dict:
     get = lambda key: _clean_text(profile.get(key))
+    name      = get("name")
     position  = get("position")
     headline  = get("headline")
+    if _is_just_the_name(position, name):
+        position = ""
+    if _is_just_the_name(headline, name):
+        headline = ""
     country   = get("country")
     about     = get("about")
     industry  = get("industry")
