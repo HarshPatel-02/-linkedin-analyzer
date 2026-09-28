@@ -147,6 +147,8 @@ function loadApiBase(cb) {
     const settings = (r && r[LI_SETTINGS_KEY]) || {};
     API_BASE = liApiBase(settings);
     $("api-base").value = settings.apiBase || "";
+    $("admin-base").value = settings.adminBase || "";
+    $("admin-base").placeholder = LI_ADMIN_DEFAULT;
     $("api-base").placeholder = LI_API_DEFAULT;
     if (cb) cb();
   });
@@ -174,7 +176,29 @@ async function saveApiBase(url) {
   });
 }
 
-$("api-save").onclick = () => saveApiBase($("api-base").value);
+$("api-save").onclick = () => { saveApiBase($("api-base").value); saveAdminBase($("admin-base").value); };
+
+// The admin backend is where scores and ICP rules live, so it gets the same
+// treatment: saved with the other settings, tested straight after saving.
+async function saveAdminBase(url) {
+  const clean = liCleanApiBase(url);
+  if (url.trim() && !clean) { $("api-status").textContent = "❌ Admin URL is not a URL"; return; }
+  chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
+    const settings = Object.assign({}, (r && r[LI_SETTINGS_KEY]) || {}, { adminBase: clean });
+    chrome.storage.local.set({ [LI_SETTINGS_KEY]: settings }, async () => {
+      const base = liAdminBase(settings);
+      try {
+        const resp = await fetchWithTimeout(base + "/extension/status", {}, 12000);
+        const data = await resp.json().catch(() => ({}));
+        $("api-status").textContent = resp.ok
+          ? "✅ Admin connected · scoring ICP: " + ((data.activeIcp && data.activeIcp.name) || "none selected")
+          : "⚠️ Admin reached but returned " + resp.status;
+      } catch (e) {
+        $("api-status").textContent = "❌ Admin " + base + " — " + e.message;
+      }
+    });
+  });
+}
 $("api-hosted").onclick = () => { $("api-base").value = LI_API_HOSTED; saveApiBase(LI_API_HOSTED); };
 
 // ─── My pitch (backend: /pitch-config → pitch_config.json) ────────────────────
