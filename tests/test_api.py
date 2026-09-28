@@ -174,3 +174,27 @@ def test_suggest_messages_accepts_setup_fields(client):
     })
     body = res.json()
     assert res.status_code == 200 and body["mode"] == "invite" and len(body["suggestions"]) >= 1
+
+
+def test_lead_message_endpoint(client, monkeypatch):
+    """Admin panel: POST /lead-message -> the message card, first-contact case."""
+    monkeypatch.setattr(ai_service, "_providers", lambda: [{"name": "Fake", "url": "", "key": "k"}])
+    monkeypatch.setattr(ai_service, "_call_ai", lambda prompt, deadline=None: json.dumps({
+        "conversation_exists": False, "profile_summary": "Runs a care network.",
+        "contact_reason": "Posts about clinic staffing.", "intent": "clinic operations",
+        "recommended_tone": "professional",
+        "suggested_message": "Saw your note on clinic staffing - we work with care networks on that. Worth a chat?",
+        "personalization_points": ["Recent activity: clinic staffing"], "needs_review": True}))
+    res = client.post("/lead-message", json={"name": "Brad Hively", "company": "CarePath Health",
+                                             "job_title": "CEO", "messages": []})
+    body = res.json()
+    assert res.status_code == 200 and body["success"] is True
+    assert body["conversation_exists"] is False and body["needs_review"] is True
+    assert body["suggested_message"].startswith("Saw your note")
+    assert set(body) >= {"profile_summary", "contact_reason", "intent", "recommended_tone",
+                         "personalization_points"}
+
+
+def test_lead_message_without_ai_keys_is_an_error(client):
+    res = client.post("/lead-message", json={"name": "Brad Hively"})
+    assert res.status_code == 500 and "No AI key set" in res.json()["detail"]

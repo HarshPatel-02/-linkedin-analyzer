@@ -7,9 +7,11 @@ from dotenv import load_dotenv
 # MUST run before the service imports below: they read .env values at import time
 load_dotenv()
 
-from models import AnalyzeRequest, IcpScore, ProfileData, IcpConfig, SuggestRequest, PitchConfig, OutreachRequest
+from models import (AnalyzeRequest, IcpScore, ProfileData, IcpConfig, SuggestRequest, PitchConfig,
+                    OutreachRequest, LeadMessageRequest)
 from services.actor_service import run_apify_actor, run_posts_actor, map_apify_to_profile
-from services.ai_service import generate_chat_suggestions, generate_outreach, get_pitch_config, save_pitch_config
+from services.ai_service import (generate_chat_suggestions, generate_outreach, generate_lead_message,
+                                 get_pitch_config, save_pitch_config)
 from services.icp_service import calculate_icp, run_company_actor, get_icp_config, save_icp_config
 from services.scoring_service import (compute_score, newest_post, get_activity_points, save_activity_points,
                                       get_signal_keywords, save_signal_keywords)
@@ -264,6 +266,18 @@ async def outreach_suggestion(data: OutreachRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))
+
+@app.post("/lead-message")
+async def lead_message(data: LeadMessageRequest):
+    """Admin panel: profile (+ conversation) -> one ready-to-send LinkedIn message
+    plus the labels the panel shows around it. Nothing is ever sent from here."""
+    try:
+        result = await asyncio.to_thread(generate_lead_message, data.model_dump())
+        return {"success": True, **result}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
 
 @app.get("/pitch-config")
 async def read_pitch_config():
