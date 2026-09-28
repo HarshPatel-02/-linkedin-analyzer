@@ -2641,6 +2641,7 @@ async function fetchAiSuggestions(record, req, cacheKey, render) {
     const list = (data.suggestions || []).filter((s) => typeof s === "string" && s.trim());
     if (!list.length) throw new Error("no suggestions returned");
     entry = { list, pain: data.pain_point || "", painSource: data.pain_source || "", analysis: data.analysis || "",
+              intent: data.intent || "", needsFollowUp: data.needs_follow_up === true,
               source: data.source || "ai", notice: data.notice || "",
               basis: req.context === "invite" ? noteBasis({ ...scores, ...about }) : [] };
     if (entry.pain) updateLead(req.profileUrl, req.fullName, { painPoint: entry.pain });
@@ -2882,7 +2883,15 @@ async function toggleAiPopup(editable, spark, opts) {
         : "";
       // The AI's read of where the chat stands, so you can see why it suggests what it does
       const lineCss = "margin:0 0 6px;padding:6px 10px;border-radius:8px;background:var(--li-surface-2,#f3f4f6);color:var(--li-fg-2,#374151);font-size:11.5px;line-height:1.4;";
-      const analysisLine = entry.analysis && !state.action
+      // What they are asking for, so the suggestion can be read and sent without
+      // wading through the model's reasoning. Falls back to the older analysis line.
+      const intentLine = entry.intent && !state.action && !invite
+        ? '<div data-role="intent" style="' + lineCss + '"><strong>They’re asking:</strong> ' +
+          escHtml(entry.intent) +
+          (entry.needsFollowUp ? ' · <span style="color:var(--li-warn-fg,#92400e);">needs a follow-up</span>' : "") +
+          "</div>"
+        : "";
+      const analysisLine = entry.analysis && !state.action && !intentLine
         ? '<div data-role="analysis" style="' + lineCss + '"><strong>' +
           (invite ? "Why this person:" : "Conversation (" + n + " message" + (n === 1 ? "" : "s") + " read):") +
           "</strong> " + escHtml(entry.analysis) + "</div>"
@@ -2896,7 +2905,7 @@ async function toggleAiPopup(editable, spark, opts) {
         ? '<div data-role="notice" role="status" style="margin:0 0 6px;font-size:11px;line-height:1.4;color:var(--li-warn-fg,#92400e);">Template — ' +
           escHtml(entry.notice) + "</div>"
         : "";
-      body = heading + analysisLine + basisLine + noticeLine + painLine +
+      body = heading + intentLine + analysisLine + basisLine + noticeLine + painLine +
         entry.list.map((s) => '<button type="button" class="li-ai-sug" style="' + AI_ITEM_CSS + '">' + escHtml(s) + "</button>").join("");
     } else if (entry && entry.error) {
       body = '<div role="alert" style="padding:10px 12px;border:1px solid #fca5a5;border-radius:8px;background:rgba(239,68,68,.08);color:var(--li-fg,#111827);font-size:12.5px;line-height:1.45;">' +

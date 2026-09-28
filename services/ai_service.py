@@ -179,8 +179,14 @@ def _json_format(pain: bool = False, analysis: bool = False) -> str:
     if pain:
         return 'Return ONLY JSON: {"pain_point": "<one short phrase>", "suggestions": ["...", "...", "..."]}'
     if analysis:
-        return ('Return ONLY JSON: {"analysis": "<one sentence: where the chat stands and what the next message '
-                'should do>", "suggestions": ["...", "...", "..."]}')
+        # suggestions[0] is the one the UI offers to copy and send; the rest are
+        # alternatives. intent / tone / needs_follow_up let the UI label the reply
+        # without putting the model's reasoning on screen.
+        return ('Return ONLY JSON: {"intent": "<what THEY want in the latest message, 2-5 words>", '
+                '"tone": "professional"|"friendly"|"casual", '
+                '"needs_follow_up": true|false, '
+                '"analysis": "<one sentence: where the chat stands and what the next message should do>", '
+                '"suggestions": ["<the reply to send>", "<alternative>", "<alternative>"]}')
     return 'Return ONLY JSON: {"suggestions": ["...", "...", "..."]}'
 
 
@@ -238,25 +244,45 @@ def _followup_rule(messages: list[dict], awaiting_reply_days) -> str:
 
 def _reply_prompt(pitch, messages, tone, first, profile, lead, max_chars, awaiting_reply_days=None) -> list[dict]:
     system = (
-        _persona(pitch) + f"{TONE_RULES[tone]}\n"
-        "First read the whole conversation and judge where it stands: who spoke last, any question of theirs "
-        "still unanswered, and the stage (first contact / building rapport / discussing needs / scheduling a call "
-        "/ gone quiet). Write the next messages for THAT situation.\n"
+        _persona(pitch) +
+        "You are a professional LinkedIn conversation assistant. Read the whole conversation, then write the "
+        "message I should send next.\n"
+        f"{TONE_RULES[tone]}\n"
+        "Judge where the chat stands: who spoke last, any question of theirs still unanswered, and the stage "
+        "(first contact / building rapport / discussing needs / scheduling a call / gone quiet).\n"
         "Rules:\n"
-        f"- Write {SUGGESTION_MAX} different next messages I could send, each under {max_chars} characters.\n"
-        "- If the last message is from them, reply directly to it (answer their question, react to what they said).\n"
-        "- If the last message is mine, write a natural follow-up — never repeat my previous text.\n"
-        "- Build on what was already said; never re-introduce myself or re-pitch something they already heard.\n"
-        "- Each suggestion takes a different angle; keep the sales offer light and relevant.\n"
-        f"- A line like [shared a post by X: \"…\"] is a LinkedIn post shared in the chat. X is only the post's author, "
-        f"NOT the person I'm chatting with — never greet or address X; talk to {first} about the post if relevant.\n"
+        f"- Write {SUGGESTION_MAX} messages I could send, each under {max_chars} characters. The FIRST is the "
+        "one I am most likely to send; the others are alternatives.\n"
+        "- Answer what they actually asked. If something is genuinely missing, ask one natural follow-up "
+        "question.\n"
+        "- Sound like a person typing on LinkedIn: natural and conversational, never like a chatbot, template "
+        "or sales automation. No corporate filler.\n"
+        "- Never repeat what the conversation already says, and never re-introduce myself or re-pitch something "
+        "they already heard.\n"
+        "- Match the tone they are using. Keep it concise unless their question needs detail.\n"
+        "- No greetings or sign-offs unless the conversation calls for one.\n"
+        "- Never invent facts, prices, availability, timelines or personal details.\n"
+        "- On business, hiring, sales or networking topics, stay helpful rather than promotional.\n"
+        "- If the last message is mine, write a natural follow-up instead of a reply.\n"
+        f"- A line like [shared a post by X: \"…\"] is a LinkedIn post shared in the chat. X is only the "
+        f"post's author, NOT the person I am chatting with — never greet or address X; talk to {first} about "
+        "the post if relevant.\n"
         + _followup_rule(messages, awaiting_reply_days)
         + _fit_rule(lead) + _language_rule(messages) + COMMON_RULES +
         f"- Address them as {first} when natural.\n" + _json_format(analysis=True)
     )
-    user = f"{_profile_block(profile)}\n\nLast {len(messages)} message(s), oldest first:\n{_transcript(messages, first)}"
+    # Three labelled blocks: who they are, the thread, and the message being answered.
+    latest = messages[-1] if messages else None
+    latest_block = "(none — I spoke last)"
+    if latest:
+        latest_block = f"{_speaker(latest.get('name'), first)}: {latest.get('text', '')}"
+    user = (
+        f"PROFILE_DATA\n{_profile_block(profile)}\n\n"
+        f"CONVERSATION_HISTORY (last {len(messages)} message(s), oldest first)\n"
+        f"{_transcript(messages, first)}\n\n"
+        f"LATEST_MESSAGE\n{latest_block}"
+    )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
-
 
 def _casual_opener_prompt(pitch, first, profile, lead, max_chars, invite) -> list[dict]:
     kind = "connection-request notes" if invite else "first LinkedIn messages (we have never chatted)"
@@ -333,16 +359,22 @@ def _json_object(content: str):
 
 def _parse_reply(content: str, max_chars: int = MAX_CHARS) -> tuple[list[str], str]:
     """-> (suggestions, pain_point)"""
-    suggestions, pain, _ = _parse_reply_full(content, max_chars)
+    suggestions, pain, _, _meta = _parse_reply_full(content, max_chars)
     return suggestions, pain
 
 
-def _parse_reply_full(content: str, max_chars: int = MAX_CHARS) -> tuple[list[str], str, str]:
-    """-> (suggestions, pain_point, analysis)"""
+def _parse_reply_full(content: str, max_chars: int = MAX_CHARS) -> tuple[list[str], str, str, dict]:
+    """-> (suggestions, pain_point, analysis, meta)
+
+    meta carries the reply assistant's labels for the UI: what they want
+    (intent), the register to answer in (tone) and whether a question of
+    ours is still open (needs_follow_up). Absent keys simply stay empty.
+    """
     text = (content or "").strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
     items: list = []
     pain = analysis = ""
+    meta: dict = {}
     data = _json_object(text)
     if data is not None:
         items = data.get("suggestions") or []
@@ -350,6 +382,16 @@ def _parse_reply_full(content: str, max_chars: int = MAX_CHARS) -> tuple[list[st
             items = []
         pain = str(data.get("pain_point") or "").strip()
         analysis = re.sub(r"\s+", " ", str(data.get("analysis") or "")).strip()
+        intent = re.sub(r"\s+", " ", str(data.get("intent") or "")).strip()
+        reply_tone = str(data.get("tone") or "").strip().lower()
+        follow = data.get("needs_follow_up")
+        if isinstance(follow, str):
+            follow = follow.strip().lower() in ("true", "yes", "1")
+        meta = {
+            "intent": intent[:80],
+            "tone": reply_tone if reply_tone in ("professional", "friendly", "casual") else "",
+            "needs_follow_up": bool(follow) if follow is not None else None,
+        }
     if not items:
         # Model ignored the JSON instruction → take numbered / bulleted lines only
         # (anything else, e.g. a guard model's "User Safety: safe", is rejected)
@@ -360,7 +402,7 @@ def _parse_reply_full(content: str, max_chars: int = MAX_CHARS) -> tuple[list[st
         s = str(s).strip().strip('"').strip()
         if len(s) >= 15:
             out.append(_fit_length(s, max_chars))
-    return out[:SUGGESTION_MAX], pain[:120], analysis[:240]
+    return out[:SUGGESTION_MAX], pain[:120], analysis[:240], meta
 
 
 def _fit_length(s: str, max_chars: int) -> str:
@@ -431,14 +473,19 @@ def generate_chat_suggestions(messages: list[dict], tone: str, first_name: str, 
             last_error = str(e)
             time.sleep(min(1 + attempt, max(0.0, deadline - time.time() - 5)))
             continue
-        suggestions, pain, analysis = _parse_reply_full(content, max_chars)
+        suggestions, pain, analysis, meta = _parse_reply_full(content, max_chars)
         if len(suggestions) >= 2 or (mode == "rewrite" and suggestions):
             return {
                 "suggestions": suggestions,
+                # The one to copy and send; the rest are alternatives.
+                "suggested_response": suggestions[0] if suggestions else "",
                 "mode":        mode,
                 "pain_point":  pain if pain_source else "",
                 "pain_source": pain_source if pain else "",
                 "analysis":    analysis if mode == "reply" else "",
+                "intent":           meta.get("intent", "") if mode == "reply" else "",
+                "reply_tone":       meta.get("tone", "") if mode == "reply" else "",
+                "needs_follow_up":  meta.get("needs_follow_up") if mode == "reply" else None,
             }
     raise Exception(last_error)
 
@@ -945,7 +992,7 @@ def generate_invite_notes(req: dict, tone: str, max_chars: int, profile_url: str
         except Exception as e:
             problem = str(e)
             break
-        suggestions, pain, analysis = _parse_reply_full(content, max_chars)
+        suggestions, pain, analysis, _meta = _parse_reply_full(content, max_chars)
         personal = [n for n in suggestions if _is_personal(n, tokens)]
         if len(personal) >= 2:
             return {**result, "suggestions": personal, "analysis": analysis or angle, "source": "ai",
