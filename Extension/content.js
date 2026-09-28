@@ -429,7 +429,9 @@ function injectStyles() {
     .li-kw:focus-within{border-color:var(--li-green);box-shadow:0 0 0 2px rgba(5,150,105,.15);}
     .li-kw-chips{display:flex;flex-wrap:wrap;gap:5px;max-height:132px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--li-thumb) transparent;}
     .li-kw-chip{display:inline-flex;align-items:center;gap:2px;max-width:100%;padding:2px 3px 2px 9px;border-radius:999px;background:var(--li-chip-bg);color:var(--li-kw-fg);font-size:12px!important;font-weight:600;line-height:18px;}
-    .li-kw-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .li-kw-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer;}
+    .li-kw-chip.off{background:var(--li-surface-2);color:var(--li-muted);}
+    .li-kw-chip.off .li-kw-text{text-decoration:line-through;opacity:.75;}
     .li-kw-x{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:18px;height:18px;padding:0;border:0;border-radius:50%;background:transparent;color:inherit;cursor:pointer;opacity:.7;}
     .li-kw-x:hover{opacity:1;background:rgba(5,150,105,.18);}
     .li-kw-x:focus-visible{outline:2px solid var(--li-green);outline-offset:1px;opacity:1;}
@@ -1379,6 +1381,12 @@ const ICON_PLUS_SMALL = '<svg width="11" height="11" viewBox="0 0 16 16" fill="n
 // Shared chip editor. `prefix` names the editor family ("li-icp", "li-sig"):
 // the hidden textarea #<prefix>-<key> holds one keyword per line.
 const KW_ON_EDIT = {};   // prefix → called after every add / remove
+// "<prefix>|<key>" → Set of lowercased keywords switched off. A switched-off
+// keyword stays in the list and keeps its place; it is just left out of scoring,
+// so trying a rule without it never means retyping it.
+const KW_OFF = {};
+const kwOffSet = (prefix, key) => (KW_OFF[prefix + "|" + key] ||= new Set());
+const kwIsOff = (prefix, key, kw) => kwOffSet(prefix, key).has(String(kw).toLowerCase());
 
 function kwEditorHTML(prefix, key, label, tone, placeholder) {
   return `<div class="li-kw${tone === "blue" ? " blue" : ""}" data-prefix="${prefix}" data-key="${key}">
@@ -1405,9 +1413,13 @@ function renderChips(prefix, key) {
   if (!box) return;
   const list = kwList(prefix, key);
   box.innerHTML = list.length
-    ? list.map((kw, i) => `<span class="li-kw-chip" role="listitem" title="${escAttr(kw)}">
-        <span class="li-kw-text">${escHtml(kw)}</span>
-        <button type="button" class="li-kw-x" data-i="${i}" aria-label="Remove ${escAttr(kw)}">${ICON_X_SMALL}</button></span>`).join("")
+    ? list.map((kw, i) => {
+        const off = kwIsOff(prefix, key, kw);
+        return `<span class="li-kw-chip${off ? " off" : ""}" role="listitem">
+        <button type="button" class="li-kw-text" data-toggle="${i}" aria-pressed="${off ? "false" : "true"}"
+          title="${escAttr(off ? "Switch on: " + kw : "Switch off (keeps it in the list): " + kw)}">${escHtml(kw)}</button>
+        <button type="button" class="li-kw-x" data-i="${i}" aria-label="Remove ${escAttr(kw)}">${ICON_X_SMALL}</button></span>`;
+      }).join("")
     : `<span class="li-kw-empty">No keywords yet</span>`;
 }
 
@@ -1454,6 +1466,18 @@ function wireChipEditors(root, prefix, onEdit) {
       list.splice(+x.dataset.i, 1);
       setKwList(prefix, key, list);
       document.getElementById(`${prefix}-${key}-new`)?.focus();
+      return;
+    }
+    const toggle = e.target.closest(".li-kw-text");
+    if (toggle) {
+      const kwText = kwList(prefix, key)[+toggle.dataset.toggle];
+      if (kwText) {
+        const set = kwOffSet(prefix, key);
+        const id = String(kwText).toLowerCase();
+        set.has(id) ? set.delete(id) : set.add(id);
+        renderChips(prefix, key);
+        if (KW_ON_EDIT[prefix]) KW_ON_EDIT[prefix]();
+      }
       return;
     }
     const add = e.target.closest(".li-kw-addbtn");
@@ -1549,6 +1573,10 @@ async function openIcpForm(reset) {
       for (const f of ICP_FIELDS) {
         const el = document.getElementById(`li-icp-${f.key}`);
         if (el) el.value = (config[f.key] || []).join("\n");
+        // Restore which keywords were switched off before drawing the chips
+        const off = kwOffSet("li-icp", f.key);
+        off.clear();
+        for (const kw of ((config.DISABLED || {})[f.key] || [])) off.add(String(kw).toLowerCase());
         renderIcpChips(f.key);
       }
     }
@@ -1586,6 +1614,13 @@ function collectIcpKeywords() {
   }
   const form = document.getElementById("li-icp-form");
   if (form) config.POINTS = readPoints(form);
+  // Switched-off keywords travel with the lists so the backend keeps them but
+  // leaves them out of scoring.
+  config.DISABLED = {};
+  for (const f of ICP_FIELDS) {
+    const off = kwOffSet("li-icp", f.key);
+    config.DISABLED[f.key] = (config[f.key] || []).filter((kw) => off.has(String(kw).toLowerCase()));
+  }
   return config;
 }
 
