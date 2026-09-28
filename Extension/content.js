@@ -154,8 +154,22 @@ function currentCompanyFromTopCard(topCard) {
   } catch (e) { return ""; }
 }
 
+// LinkedIn's name row reads "Kristin Bryce · 2nd" (plus a verified badge and
+// sometimes pronouns). It is easy to pick up instead of the headline below it,
+// and a name holds no job title, so anything that is only the name is rejected.
+const NAME_NOISE_RE = /\b(1st|2nd|3rd|premium|verified|he|him|she|her|they|them)\b/g;
+const NORM_TEXT = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+function isJustTheName(t, name) {
+  const a = NORM_TEXT(t), b = NORM_TEXT(name);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (!a.startsWith(b)) return false;
+  return !a.slice(b.length).replace(NAME_NOISE_RE, " ").replace(/[^a-z0-9]+/g, "");
+}
+
 function headlineOK(t, name) {
-  return !!t && t.length > 2 && t.length < 220 && t !== name &&
+  return !!t && t.length > 2 && t.length < 220 && !isJustTheName(t, name) &&
     !UI_LINE_RE.test(t) && !COUNT_LINE_RE.test(t) && !/notification/i.test(t);
 }
 
@@ -1309,7 +1323,7 @@ async function calculateActivityScore() {
 
   setBusy(ACTIVITY_ACTIONS, true);
   btn.textContent = "⏳ Calculating…";
-  setActivityStatus("Reading their profile and recent posts — this can take up to a minute…");
+  setActivityStatus("Reading their profile and recent posts this can take up to a minute…");
 
   try {
     saveActivityFormValues(collectActivityFormValues());
