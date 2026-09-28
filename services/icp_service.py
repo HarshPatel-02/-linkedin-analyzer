@@ -156,6 +156,10 @@ def save_icp_config(config: dict) -> dict:
     clean["POINTS"] = (dict(DEFAULT_ICP_POINTS) if points == "reset"
                        else _clean_points(points, current["POINTS"]))
 
+    # Every save is a new configuration version, so an analysis can record which
+    # rules produced it and older results stay traceable.
+    clean["version"] = icp_config_version() + 1
+
     with open(ICP_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(clean, f, indent=2, ensure_ascii=False)
     return apply_icp_config(clean)
@@ -395,3 +399,39 @@ def run_company_actor(profile_url: str) -> dict:
         return {}
     except Exception:
         return {}
+
+
+# ─── What actually matched, for the extension and admin panel ─────────────────
+# Uses the same matchers the scorer uses, so the lists can never disagree with the
+# score. Returned alongside it rather than parsed back out of the reason strings.
+def icp_matches(profile: dict) -> dict:
+    get = lambda key: _clean_text(profile.get(key))
+    position = get("position")
+    headline = get("headline")
+    country  = get("country")
+    about    = get("about")
+    industry = get("industry")
+    company  = get("current_company_name") or get("current_company")
+
+    search_text = " ".join(s for s in (about, company, position, headline, industry) if s)
+    title_text  = " ".join(s for s in (position, headline) if s)
+    geo_text    = expand_location(country) if country else ""
+    return {
+        "matched_industries":   all_matches(EXACT_INDUSTRIES + RELATED_INDUSTRIES, search_text),
+        "matched_titles":       all_matches(TIER_1_TITLES + TIER_2_TITLES + TIER_3_TITLES, title_text),
+        "matched_geographies":  all_matches(PRIMARY_GEOGRAPHIES + SECONDARY_GEOGRAPHIES, geo_text, plural=False),
+        "matched_keywords":     all_matches(ALL_ICP_KEYWORDS, search_text),
+        "matched_company_size": all_matches(EXACT_COMPANY_SIZE_KEYWORDS + NEARBY_COMPANY_SIZE_KEYWORDS,
+                                            " ".join(s for s in (company, about) if s)),
+    }
+
+
+def icp_config_version() -> int:
+    """Bumped by save_icp_config; every analysis records the version it used."""
+    try:
+        if os.path.exists(ICP_CONFIG_FILE):
+            with open(ICP_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return int(json.load(f).get("version") or 1)
+    except Exception:
+        pass
+    return 1

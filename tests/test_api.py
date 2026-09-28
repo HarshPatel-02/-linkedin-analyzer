@@ -198,3 +198,63 @@ def test_lead_message_endpoint(client, monkeypatch):
 def test_lead_message_without_ai_keys_is_an_error(client):
     res = client.post("/lead-message", json={"name": "Brad Hively"})
     assert res.status_code == 500 and "No AI key set" in res.json()["detail"]
+
+
+# ─── Single source of truth: one analysis both clients render ─────────────────
+def test_profiles_analyze_returns_one_scored_result(client, monkeypatch, ago):
+    posts = [{"url": f"https://p/{i}", "text": f"Hiring clinicians for our healthcare platform {i}",
+              "postedAt": ago(i + 1), "numLikes": 15, "numComments": 6, "numShares": 3,
+              "author": {"publicIdentifier": "priya"}} for i in range(5)]
+    monkeypatch.setattr(main, "run_apify_actor", lambda url: _apify_profile())
+    monkeypatch.setattr(main, "run_posts_actor", lambda url, max_posts=20, errors=None: posts)
+    body = client.post("/profiles/analyze", json={
+        "profile_url": "https://www.linkedin.com/in/priya/", "name": "Priya Sharma",
+        "position": "Founder & CEO", "country": "Mumbai, India", "industry": "Hospitals and Health Care",
+        "mutual_connections": 7}).json()
+
+    assert body["success"] and body["data_available"] and body["missing_fields"] == []
+    # every score the two clients show comes from here
+    for key in ("icp_score", "activity_score", "overall_score", "icp_match", "activity_match"):
+        assert key in body
+    assert body["overall_score"] == round(0.5 * body["icp_score"] + 0.5 * body["activity_score"])
+    assert body["icp_match"] is (body["icp_score"] >= body["match_thresholds"]["icp"])
+    # what matched, and why
+    assert "healthcare" in [k.lower() for k in body["matched_industries"]] or body["matched_industries"] == []
+    assert any("Job Title Match" in r for r in body["score_reasons"])
+    assert body["scoring_config_version"] >= 1
+    # activity was really read
+    act = body["activity"]
+    assert act["activity_data_available"] is True
+    assert act["posts_analyzed"] == 5 and len(act["relevant_posts"]) <= 5
+    assert act["activity_level"] in ("low", "medium", "high")
+
+
+def test_profiles_analyze_reports_missing_data_instead_of_scoring(client):
+    body = client.post("/profiles/analyze", json={"profile_url": "", "name": ""}).json()
+    assert body == {"success": False, "data_available": False,
+                    "missing_fields": ["name", "profile_url"],
+                    "message": "Required profile data could not be collected."}
+
+
+def test_profiles_analyze_says_activity_unavailable_rather_than_zero(client, monkeypatch):
+    """No readable posts must not look like a real Activity score of 0."""
+    monkeypatch.setattr(main, "run_apify_actor", lambda url: _apify_profile())
+    monkeypatch.setattr(main, "run_posts_actor", lambda url, max_posts=20, errors=None: [])
+    body = client.post("/profiles/analyze", json={
+        "profile_url": "https://www.linkedin.com/in/priya/", "name": "Priya Sharma"}).json()
+    act = body["activity"]
+    assert act["activity_data_available"] is False
+    assert act["activity_level"] == "none" and act["relevant_posts"] == []
+    assert "No posts could be read for this profile." in act["activity_reasons"]
+
+
+def test_analysis_records_the_config_version_and_follows_new_rules(client):
+    """Changing ICP keywords changes later analyses, with no code change."""
+    before = client.post("/profiles/analyze", json={
+        "profile_url": "https://www.linkedin.com/in/x/", "name": "X", "position": "Chief Llama Officer"}).json()
+    client.post("/icp-config", json={"TIER_1_TITLES": ["chief llama officer"]})
+    after = client.post("/profiles/analyze", json={
+        "profile_url": "https://www.linkedin.com/in/x/", "name": "X", "position": "Chief Llama Officer"}).json()
+    assert after["scoring_config_version"] > before["scoring_config_version"]
+    assert after["icp_score"] > before["icp_score"]
+    assert "chief llama officer" in [t.lower() for t in after["matched_titles"]]

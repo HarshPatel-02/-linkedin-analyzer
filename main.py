@@ -13,6 +13,7 @@ from services.actor_service import run_apify_actor, run_posts_actor, map_apify_t
 from services.ai_service import (generate_chat_suggestions, generate_outreach, generate_lead_message,
                                  get_pitch_config, save_pitch_config)
 from services.icp_service import calculate_icp, run_company_actor, get_icp_config, save_icp_config
+from services.analysis_service import analyze_profile
 from services.scoring_service import (compute_score, newest_post, get_activity_points, save_activity_points,
                                       get_signal_keywords, save_signal_keywords)
 
@@ -145,6 +146,59 @@ async def analyze(data: AnalyzeRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))
+
+REQUIRED_PROFILE_FIELDS = ("name", "profile_url")
+
+
+@app.post("/profiles/analyze")
+async def profiles_analyze(data: AnalyzeRequest):
+    """One analysis per profile: ICP + Activity + overall, with what matched and why.
+
+    The single source of truth for scoring — the extension and the admin panel both
+    render this response and neither recalculates. Scores are deterministic: they
+    come from the administrator's ICP keywords and activity points, not from AI.
+    """
+    payload = data.model_dump()
+    profile_url = (payload.get("profile_url") or payload.get("profileUrl") or "").strip()
+    missing = [f for f in REQUIRED_PROFILE_FIELDS
+               if not str(payload.get(f) or (profile_url if f == "profile_url" else "")).strip()]
+    if missing:
+        # Never score a profile we could not actually read.
+        return {"success": False, "data_available": False, "missing_fields": missing,
+                "message": "Required profile data could not be collected."}
+
+    apify_data, posts_data, notes = {}, [], []
+    if profile_url:
+        try:
+            apify_task = asyncio.to_thread(run_apify_actor, profile_url)
+            posts_task = asyncio.to_thread(run_posts_actor, profile_url, 20, notes)
+            apify_data, posts_data = await asyncio.gather(apify_task, posts_task)
+        except Exception as exc:
+            notes.append(f"profile scrape failed: {exc}")
+            apify_data, posts_data = {}, []
+
+    try:
+        if apify_data:
+            profile = map_apify_to_profile(apify_data, profile_url, posts_data)
+            edits = collect_form_edits(payload)
+            if edits.get("activity") and newest_post(list(posts_data or []) + list(apify_data.get("posts") or [])):
+                edits.pop("activity")
+            if edits:
+                profile = ProfileData(**{**profile.model_dump(), **edits})
+        else:
+            allowed = set(ProfileData.model_fields.keys())
+            profile = ProfileData(**{k: v for k, v in payload.items() if k in allowed})
+            profile.profileUrl = profile.profileUrl or profile_url
+
+        result = analyze_profile(profile, apify_data, posts_data, icp_input=payload)
+        return {"success": True, "data_available": True, "missing_fields": [],
+                "collection_notes": notes,
+                "profile": profile.model_dump(include=set(ProfileData.model_fields) - {"timestamp"}),
+                **result}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
 
 @app.post("/icp-score")
 async def icp_score(data: IcpScore):
