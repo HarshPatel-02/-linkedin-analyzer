@@ -56,7 +56,7 @@ def test_history_skips_empty_and_invalid_messages():
 def test_parse_reply_with_analysis():
     content = '```json\n{"analysis": "They asked about pricing — answer it.", "suggestions": ' \
               '["Our pricing depends on scope, happy to share", "Great question, here is how we price"]}\n```'
-    suggestions, pain, analysis = ai._parse_reply_full(content)
+    suggestions, pain, analysis, meta = ai._parse_reply_full(content)
     assert len(suggestions) == 2 and pain == ""
     assert analysis == "They asked about pricing — answer it."
     assert ai._parse_reply(content) == (suggestions, "")      # old 2-tuple API unchanged
@@ -64,9 +64,9 @@ def test_parse_reply_with_analysis():
 
 def test_parse_reply_without_analysis_and_bullets_fallback():
     assert ai._parse_reply_full('{"suggestions": ["a long enough suggestion", "another long suggestion"]}')[2] == ""
-    suggestions, _, analysis = ai._parse_reply_full("1. First bullet suggestion here\n2. Second bullet suggestion")
+    suggestions, _, analysis, _meta = ai._parse_reply_full("1. First bullet suggestion here\n2. Second bullet suggestion")
     assert suggestions == ["First bullet suggestion here", "Second bullet suggestion"] and analysis == ""
-    assert ai._parse_reply_full("User Safety: safe") == ([], "", "")
+    assert ai._parse_reply_full("User Safety: safe")[:3] == ([], "", "")
 
 
 # ─── Reply prompt ─────────────────────────────────────────────────────────────
@@ -334,3 +334,25 @@ def test_outreach_uses_role_pain_and_prior(fake_ai):
     p = fake_ai["prompts"][0]
     assert "on behalf of the Growth Lead" in p[0]["content"]
     assert "Known pain point" in p[1]["content"] and "Previous contact" in p[1]["content"]
+
+
+def test_parse_reply_returns_intent_tone_and_follow_up():
+    """The reply assistant labels each suggestion so the UI can show
+    "Suggested response" without printing the model's reasoning."""
+    content = ('{"intent": "asking about pricing", "tone": "friendly", "needs_follow_up": true, '
+               '"analysis": "They asked what it costs.", '
+               '"suggestions": ["Pricing depends on scope - what size team are you thinking?", '
+               '"Happy to walk through pricing, how many users?"]}')
+    suggestions, _, analysis, meta = ai._parse_reply_full(content)
+    assert suggestions[0].startswith("Pricing depends on scope")
+    assert analysis == "They asked what it costs."
+    assert meta == {"intent": "asking about pricing", "tone": "friendly", "needs_follow_up": True}
+
+
+def test_parse_reply_metadata_tolerates_missing_or_odd_values():
+    _, _, _, meta = ai._parse_reply_full('{"suggestions": ["a long enough suggestion here"]}')
+    assert meta == {"intent": "", "tone": "", "needs_follow_up": None}
+    # a string boolean and an unknown tone are normalised, not trusted blindly
+    _, _, _, meta2 = ai._parse_reply_full(
+        '{"tone": "salesy", "needs_follow_up": "false", "suggestions": ["a long enough suggestion here"]}')
+    assert meta2["tone"] == "" and meta2["needs_follow_up"] is False
