@@ -1003,3 +1003,130 @@ def generate_invite_notes(req: dict, tone: str, max_chars: int, profile_url: str
     templates = [t for t in _invite_templates(ctx, pitch, tone, max_chars) if t not in best]
     return {**result, "suggestions": (best + templates)[:SUGGESTION_MAX], "source": "ai" if best else "template",
             "notice": f"AI unavailable ({_plain(problem, 120)}) — notes built from their profile."}
+
+
+# ─── Admin panel: one ready-to-send message per lead ──────────────────────────
+# The panel shows Profile + Conversation + a suggested message with Edit / Copy /
+# Send. It needs the message AND the labels around it (why this person, what they
+# want, what the personalisation was drawn from), so this returns all of it at once.
+LEAD_MESSAGE_MAX = 900
+PERSONALIZATION_MAX = 5
+
+LEAD_MESSAGE_FIELDS = ("name", "headline", "about", "company", "job_title", "industry",
+                       "location", "profile_url", "experience", "skills", "recent_activity")
+
+
+def _lead_profile_block(profile: dict) -> str:
+    labels = [("name", "Name"), ("headline", "Headline"), ("job_title", "Job title"),
+              ("company", "Current company"), ("industry", "Industry"), ("location", "Location"),
+              ("about", "About"), ("experience", "Experience"), ("skills", "Skills"),
+              ("recent_activity", "Recent activity/posts"), ("profile_url", "Profile URL")]
+    lines = []
+    for key, label in labels:
+        value = str(profile.get(key) or "").strip()
+        if value and value.lower() not in _EMPTY_VALUES:
+            lines.append(f"{label}: {value[:600]}")
+    return "\n".join(lines) or "(no profile details available)"
+
+
+def _lead_message_prompt(pitch: dict, profile: dict, messages: list, goal: str, has_convo: bool) -> list:
+    first = str(profile.get("name") or "").split()[0] if profile.get("name") else "them"
+    case = (
+        "CASE: there IS a conversation. Read all of it, focus on the latest message, and reply directly to it. "
+        "Keep the tone the conversation already has. Do not repeat what was already said. Answer any question "
+        "they asked, and add a natural follow-up question when one is warranted."
+        if has_convo else
+        "CASE: there is NO previous conversation. Write a first message. Base the reason for contact ONLY on the "
+        "profile. Never imply you have spoken before. If the profile is thin, send something simply professional "
+        "rather than inventing a detail - and never the generic \"I saw your profile and wanted to connect\"."
+    )
+    system = (
+        _persona(pitch) +
+        "You help an admin write one LinkedIn message to this person.\n" + case + "\n"
+        "Style: human, concise, professional but conversational; match how they write; no emoji unless they use "
+        "them; no gushing, no AI-sounding phrases, no long explanations, no fake personalisation. Never mention "
+        "that this was AI-written.\n"
+        "Never invent facts, numbers, prices, availability, commitments or past contact.\n"
+        f"Keep suggested_message under {LEAD_MESSAGE_MAX} characters, with no subject line and no signature.\n"
+        "personalization_points: the concrete things you actually used, each naming its source, e.g. "
+        '"Headline: Founder at Acme" or "Their last message asked about pricing". Use [] when the profile and '
+        "conversation gave you nothing specific.\n"
+        + COMMON_RULES +
+        "Return ONLY JSON: {"
+        f'"conversation_exists": {"true" if has_convo else "false"}, '
+        '"profile_summary": "<one or two sentences about this person>", '
+        '"contact_reason": "<why contacting them makes sense>", '
+        '"intent": "<what they likely want; for a first message, what they would care about>", '
+        '"recommended_tone": "professional"|"friendly"|"casual", '
+        '"suggested_message": "<the message, ready to send>", '
+        '"personalization_points": ["..."], '
+        '"needs_review": true}'
+    )
+    parts = [f"PROFILE\n{_lead_profile_block(profile)}"]
+    if has_convo:
+        parts.append("CONVERSATION (oldest first)\n" + _transcript(messages, first))
+        latest = messages[-1]
+        parts.append("LATEST_MESSAGE\n" + f"{_label(latest, first)}: {latest.get('text', '').strip()}")
+    else:
+        parts.append("CONVERSATION\n(none - this is the first message)")
+    if goal:
+        parts.append("ADMIN_GOAL\n" + goal[:400])
+    return [{"role": "system", "content": system}, {"role": "user", "content": "\n\n".join(parts)}]
+
+
+def _clean_lead_message(data: dict, has_convo: bool, max_chars: int) -> dict:
+    """Trust nothing the model returns: clamp every field to the shape the panel renders."""
+    def text(key, limit):
+        return re.sub(r"\s+", " ", str(data.get(key) or "")).strip()[:limit]
+
+    tone = str(data.get("recommended_tone") or "").strip().lower()
+    points = data.get("personalization_points")
+    if isinstance(points, str):
+        points = [points]
+    if not isinstance(points, list):
+        points = []
+    points = [re.sub(r"\s+", " ", str(p)).strip()[:160] for p in points]
+    points = [p for p in points if p][:PERSONALIZATION_MAX]
+    message = text("suggested_message", max_chars + 200)
+    return {
+        "conversation_exists": has_convo,
+        "profile_summary":     text("profile_summary", 400),
+        "contact_reason":      text("contact_reason", 300),
+        "intent":              text("intent", 200),
+        "recommended_tone":    tone if tone in ("professional", "friendly", "casual") else "professional",
+        "suggested_message":   _fit_length(message, max_chars) if message else "",
+        "personalization_points": points,
+        # Always true: a person sends this, so it is a draft until they approve it.
+        "needs_review":        True,
+    }
+
+
+def generate_lead_message(req: dict) -> dict:
+    """Profile (+ conversation, when there is one) -> the admin panel's message card."""
+    profile = {k: str(req.get(k) or "").strip() for k in LEAD_MESSAGE_FIELDS}
+    messages = [m for m in (req.get("messages") or []) if isinstance(m, dict) and str(m.get("text") or "").strip()]
+    has_convo = bool(messages)
+    goal = str(req.get("goal") or "").strip()
+    max_chars = max(120, min(int(req.get("max_chars") or LEAD_MESSAGE_MAX), LEAD_MESSAGE_MAX))
+    if not _providers():
+        raise Exception("No AI key set - add GROQ_API_KEY (or OPENROUTER_API_KEY) to .env and restart the server")
+
+    pitch = _pitch_for(req.get("sender_role") or "")
+    prompt = _lead_message_prompt(pitch, profile, messages, goal, has_convo)
+    deadline = time.time() + OUTREACH_BUDGET_S
+    last_error = "AI returned no usable message - try again"
+    for attempt in range(3):
+        if time.time() > deadline - 5:
+            break
+        try:
+            content = _call_ai(prompt, deadline)
+        except TransientAIError as e:
+            last_error = str(e)
+            time.sleep(min(1 + attempt, max(0.0, deadline - time.time() - 5)))
+            continue
+        data = _json_object(re.sub(r"^```(?:json)?\s*|\s*```$", "", (content or "").strip(), flags=re.I))
+        if isinstance(data, dict):
+            result = _clean_lead_message(data, has_convo, max_chars)
+            if result["suggested_message"]:
+                return result
+    raise Exception(last_error)

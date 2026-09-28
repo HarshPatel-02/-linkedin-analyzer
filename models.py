@@ -172,6 +172,25 @@ class OutreachRequest(BaseModel):
     prior_contact:    str = ""
 
 
+class LeadMessageRequest(BaseModel):
+    """Admin panel: this person's profile + any conversation -> one message to send."""
+    name:            str = ""
+    headline:        str = ""
+    about:           str = ""
+    company:         str = ""
+    job_title:       str = ""
+    industry:        str = ""
+    location:        str = ""
+    profile_url:     str = ""
+    experience:      str = ""
+    skills:          str = ""
+    recent_activity: str = ""
+    messages:        list[ChatMessage] = []   # empty -> first-message case
+    goal:            str = ""                 # what the admin wants from this message
+    sender_role:     str = ""
+    max_chars:       int = 900
+
+
 class PitchConfig(BaseModel):
     """Who "I" am in every AI message — saved to pitch_config.json."""
     who:           Optional[str] = None
