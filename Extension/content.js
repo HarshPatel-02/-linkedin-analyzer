@@ -96,7 +96,7 @@ function findSection(title, anchorId) {
     if (sec.closest(OUR_UI_SEL) || sec.closest("aside")) continue;
     if (sectionHeading(sec) === want) return sec;
   }
-  return nu
+  return null;
 }
 
 // Top-level entries of a card; nested lists hold grouped roles or skill details.
