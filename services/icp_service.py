@@ -232,15 +232,48 @@ def score_industry(text: str, industry: str = "") -> tuple:
     return 0, "Other"
 
 
-def score_job_title(position: str, headline: str = "") -> tuple:
+# How much of About counts as self-description. People open with their own title
+# ("Founder & CEO of Acme"); further down they describe clients and colleagues,
+# whose titles are not theirs.
+ABOUT_TITLE_CHARS = 200
+# "we help founders", "advisor to CEOs" - somebody else's title, not this person's.
+_ABOUT_TITLE_REJECT = re.compile(
+    r"(?:help(?:s|ing)?|work(?:s|ing)?\s+with|serv(?:e|es|ing)|support(?:s|ing)?|advis(?:e|es|or|ing)|"
+    r"coach(?:es|ing)?|recruit(?:s|ing)?|hire(?:s|d)?|partner(?:s|ing)?\s+with|for)\s+[\w\s,&-]{0,20}$")
+
+
+def _about_title(about: str):
+    """A title the person claims for themselves in the opening of their About."""
+    opening = _clean_text(about)[:ABOUT_TITLE_CHARS]
+    if not opening:
+        return None
+    hit = _tier_title(opening)
+    if not hit:
+        return None
+    match = first_match([hit[2]], opening)
+    if match:
+        norm = normalize(opening)
+        pattern = phrase_pattern(hit[2])
+        found = pattern.search(norm) if pattern else None
+        if found and _ABOUT_TITLE_REJECT.search(norm[:found.start()]):
+            return None            # the title belongs to the people they serve
+    return hit
+
+
+def score_job_title(position: str, headline: str = "", about: str = "") -> tuple:
     position, headline = _clean_text(position), _clean_text(headline)
-    if not position and not headline:
+    if not position and not headline and not _clean_text(about):
         return 0, "No data"
     hit = _tier_title(position) if position else None
     source = ""
     if not hit and headline and normalize(headline) != normalize(position):
         hit = _tier_title(headline)
         source = " — from headline"
+    if not hit and about:
+        # A LinkedIn headline is often just the person's name; their About still
+        # states the role. Labelled, so the breakdown shows where it came from.
+        hit = _about_title(about)
+        source = " — from About" if hit else ""
     if hit:
         points, tier, kw = hit
         return points, f"Tier {tier} ({kw}){source}"
@@ -330,7 +363,7 @@ def calculate_icp(profile: dict) -> dict:
     size_text   = " ".join(s for s in (company, about) if s)
 
     ind_score, ind_reason      = score_industry(search_text, industry)
-    title_score, title_reason  = score_job_title(position, headline)
+    title_score, title_reason  = score_job_title(position, headline, about)
     size_score, size_reason    = score_company_size(size_text, emp_count)
     geo_score, geo_reason      = score_geography(country)
     kw_score, kw_reason        = score_keywords(search_text)

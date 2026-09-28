@@ -186,3 +186,37 @@ def test_save_icp_config_roundtrip(isolated_config):
     assert icp.get_icp_config()["POINTS"]["TIER_1_TITLES"] == 30
     assert (isolated_config / "icp_config.json").exists()
     assert score_job_title("Owner")[0] == 30
+
+
+# ─── Job title from About ─────────────────────────────────────────────────────
+# A LinkedIn headline is often just the person's name (or the scrape only got the
+# name), while their About still says what they do.
+def test_title_falls_back_to_about_when_the_headline_is_only_a_name():
+    points, reason = icp.score_job_title("Samuel Donas", "Samuel Donas",
+                                         "Founder & CEO of Inboxzac, leading the company's vision.")
+    assert points == icp.ICP_POINTS["TIER_1_TITLES"]
+    assert "from About" in reason          # the breakdown says where it came from
+
+
+def test_a_real_headline_is_preferred_over_about():
+    _, reason = icp.score_job_title("", "Founder & CEO at Inboxzac", "We help founders scale.")
+    assert "from headline" in reason
+
+
+@pytest.mark.parametrize("about", [
+    "We help founders and CEOs scale their outbound.",
+    "Trusted advisor to CEOs across healthcare.",
+    "I work with founders on go-to-market.",
+])
+def test_titles_belonging_to_the_people_they_serve_do_not_count(about):
+    assert icp.score_job_title("", "", about) == (0, "Other")
+
+
+def test_title_deep_in_a_long_about_is_not_claimed():
+    """Only the opening of About is self-description."""
+    about = "x" * 400 + " Founder and CEO here."
+    assert icp.score_job_title("", "", about)[0] == 0
+
+
+def test_no_title_data_at_all_is_reported_as_no_data():
+    assert icp.score_job_title("", "", "") == (0, "No data")
