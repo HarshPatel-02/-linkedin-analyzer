@@ -96,7 +96,7 @@ function findSection(title, anchorId) {
     if (sec.closest(OUR_UI_SEL) || sec.closest("aside")) continue;
     if (sectionHeading(sec) === want) return sec;
   }
-  return null;
+  return nu
 }
 
 // Top-level entries of a card; nested lists hold grouped roles or skill details.
@@ -860,6 +860,39 @@ function pushLeadToAdmin(url, name) {
       if (res && !res.ok && res.error !== "nothing to push") console.log("[LI-AI] admin push skipped:", res.error);
     });
   } catch (e) { /* extension reloaded — the popup's Sync button still has this lead */ }
+}
+
+// The visible chat thread as plain text, oldest first — the shape the admin
+// panel's Conversation card reads. Capped at the length it accepts, keeping the
+// NEWEST messages when a thread is longer.
+const LI_TRANSCRIPT_MAX = 8000;
+function transcriptFrom(history) {
+  const lines = (history || [])
+    .filter((m) => m && String(m.text || "").trim())
+    .map((m) => (m.sender === "me" ? "You: " : m.sender === "them" ? "Them: " : "") +
+                String(m.text).replace(/\s+/g, " ").trim());
+  const text = lines.join("\n");
+  return text.length > LI_TRANSCRIPT_MAX ? text.slice(text.length - LI_TRANSCRIPT_MAX) : text;
+}
+
+// Keep the thread itself on the lead, so the admin panel can show and analyze the
+// real conversation instead of asking for it to be pasted. Only for people already
+// in the lead log — reading a chat is not a reason to start tracking someone.
+function noteConversation(history, url, name) {
+  noteReplies(history, url, name);
+  const transcript = transcriptFrom(history);
+  if (!transcript) return;
+  withLeads((leads, save) => {
+    const lead = leads[liFindLeadKey(leads, url, name)];
+    if (!lead || lead.transcript === transcript) return;
+    Object.assign(lead, {
+      transcript,
+      messageCount: history.length,
+      transcriptAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    save();
+  });
 }
 
 // Their newest message is new since my last send → they replied, stop the follow-up.
@@ -2954,7 +2987,7 @@ async function toggleAiPopup(editable, spark, opts) {
     if (editable._liLoggedKey !== histKey) {
       editable._liLoggedKey = histKey;
       try { console.log("[LI-AI] scraped chat history (" + history.length + "):", history.map((m) => "[" + (m.sender || "?") + "] " + m.text)); } catch (e) {}
-      noteReplies(history, profileUrl, fullName);
+      noteConversation(history, profileUrl, fullName);
     }
     // Person + mode are part of the key: an empty history ("") must not reuse another chat's openers.
     const act = state.action ? state.action + ":" + state.draft : "";
@@ -3202,7 +3235,7 @@ document.addEventListener("focusin", (e) => {
     try {
       const history = scrapeChatMessages(ed, AI_HISTORY_LIMIT);
       const name = chatFullName(ed, history);
-      noteReplies(history, chatProfileUrl(ed, name.split(/\s+/)[0]), name);
+      noteConversation(history, chatProfileUrl(ed, name.split(/\s+/)[0]), name);
     } catch (err) { /* ignore */ }
   }, 150);
 }, true);
