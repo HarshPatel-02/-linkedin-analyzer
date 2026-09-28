@@ -246,3 +246,37 @@ def test_the_real_headline_scores_tier_1():
                             "position": "Founder, CEO, Innovator"})
     title = result["breakdown"]["Job Title Match"]
     assert title["score"] == icp.ICP_POINTS["TIER_1_TITLES"] and "from" not in title["reason"]
+
+
+# ─── Switching a keyword off ──────────────────────────────────────────────────
+def test_disabled_keyword_stops_scoring_but_is_not_deleted():
+    """Turning a rule off must not lose what was typed."""
+    icp.save_icp_config({"TIER_1_TITLES": ["ceo", "founder"]})
+    assert calculate_icp({"position": "Founder"})["breakdown"]["Job Title Match"]["score"] > 0
+
+    icp.save_icp_config({"DISABLED": {"TIER_1_TITLES": ["founder"]}})
+    saved = icp.get_icp_config()
+    assert saved["TIER_1_TITLES"] == ["ceo", "founder"]          # still there
+    assert saved["DISABLED"]["TIER_1_TITLES"] == ["founder"]     # just switched off
+    assert calculate_icp({"position": "Founder"})["breakdown"]["Job Title Match"]["score"] == 0
+    assert calculate_icp({"position": "CEO"})["breakdown"]["Job Title Match"]["score"] > 0
+
+
+def test_switching_a_keyword_back_on():
+    icp.save_icp_config({"TIER_1_TITLES": ["ceo", "founder"], "DISABLED": {"TIER_1_TITLES": ["founder"]}})
+    assert calculate_icp({"position": "Founder"})["breakdown"]["Job Title Match"]["score"] == 0
+    icp.save_icp_config({"DISABLED": {"TIER_1_TITLES": []}})
+    assert calculate_icp({"position": "Founder"})["breakdown"]["Job Title Match"]["score"] > 0
+
+
+def test_saving_other_lists_keeps_the_disabled_map():
+    icp.save_icp_config({"TIER_1_TITLES": ["ceo", "founder"], "DISABLED": {"TIER_1_TITLES": ["founder"]}})
+    icp.save_icp_config({"PRIMARY_GEOGRAPHIES": ["india"]})      # unrelated edit
+    assert icp.get_icp_config()["DISABLED"]["TIER_1_TITLES"] == ["founder"]
+
+
+def test_config_without_a_disabled_map_still_works():
+    icp.save_icp_config({"TIER_1_TITLES": ["founder"]})
+    cfg = icp.get_icp_config()
+    assert cfg["DISABLED"]["TIER_1_TITLES"] == []
+    assert calculate_icp({"position": "Founder"})["breakdown"]["Job Title Match"]["score"] > 0

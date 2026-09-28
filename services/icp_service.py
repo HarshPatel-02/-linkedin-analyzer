@@ -130,16 +130,38 @@ def get_icp_config() -> dict:
                     if saved.get(key) is not None:
                         config[key] = _to_list(saved[key], defaults)
                 config["POINTS"] = _clean_points(saved.get("POINTS"), DEFAULT_ICP_POINTS)
+                config["DISABLED"] = _disabled_map(saved)
     except Exception:
         pass
+    config.setdefault("DISABLED", {key: [] for key in DEFAULT_ICP_CONFIG})
     return config
 
 
+def _disabled_map(config: dict) -> dict:
+    """{list name: [keywords switched off]} — kept out of scoring but not deleted."""
+    raw = config.get("DISABLED") if isinstance(config, dict) else None
+    out = {}
+    if isinstance(raw, dict):
+        for key in DEFAULT_ICP_CONFIG:
+            out[key] = _to_list(raw.get(key), [])
+    return out
+
+
+def active_keywords(config: dict, key: str) -> list:
+    """The keywords of one list that are switched on."""
+    off = {normalize(k) for k in _disabled_map(config).get(key, [])}
+    return [k for k in _to_list(config.get(key), DEFAULT_ICP_CONFIG[key]) if normalize(k) not in off]
+
+
 def apply_icp_config(config: dict) -> dict:
-    """Point the module level keyword lists at this config (used when scoring)."""
+    """Point the module level keyword lists at this config (used when scoring).
+
+    A keyword switched off stays in the saved list but is left out of the lists
+    the scorer sees, so turning a rule off never loses what was typed.
+    """
     g = globals()
-    for key, defaults in DEFAULT_ICP_CONFIG.items():
-        g[key] = _to_list(config.get(key, defaults), defaults)
+    for key in DEFAULT_ICP_CONFIG:
+        g[key] = active_keywords(config, key)
     g["ICP_POINTS"] = _clean_points(config.get("POINTS"), DEFAULT_ICP_POINTS)
     return config
 
@@ -155,6 +177,10 @@ def save_icp_config(config: dict) -> dict:
     points = config.get("POINTS") if isinstance(config, dict) else None
     clean["POINTS"] = (dict(DEFAULT_ICP_POINTS) if points == "reset"
                        else _clean_points(points, current["POINTS"]))
+    # Switched-off keywords: sent as a whole map, or left out to keep the saved one.
+    incoming = config.get("DISABLED") if isinstance(config, dict) else None
+    clean["DISABLED"] = (_disabled_map({"DISABLED": incoming}) if isinstance(incoming, dict)
+                         else _disabled_map(current))
 
     # Every save is a new configuration version, so an analysis can record which
     # rules produced it and older results stay traceable.

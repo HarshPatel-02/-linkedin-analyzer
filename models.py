@@ -99,6 +99,8 @@ class IcpConfig(BaseModel):
     SECONDARY_GEOGRAPHIES:        Optional[list[str]] = None
     ALL_ICP_KEYWORDS:             Optional[list[str]] = None
     POINTS:                       Optional[dict | str] = None   # {list: points} or "reset"
+    # {list name: [keywords switched off]} - kept in the list, left out of scoring.
+    DISABLED:                     Optional[dict] = None
 
     @field_validator(*ICP_LIST_FIELDS, mode="before")
     @classmethod
