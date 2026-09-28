@@ -1639,36 +1639,35 @@ async function calculateIcpScore() {
   const slug     = currentProfileSlug();
   const p        = scrapeProfile();     // before any wait: the page may change while we save
   setBusy(ICP_ACTIONS, true);
-  btn.textContent = "⏳ Calculating…";
+  btn.textContent = "⏳ Analyzing…";
 
   try {
-    const saved = await saveIcpKeywords();
     if (currentProfileSlug() !== slug) return;   // moved to someone else: don't score them as this person
-    setIcpStatus(`✅ Saved ${countKeywords(saved)} keywords — scoring (the company lookup can take up to a minute)…`);
+    setIcpStatus("Collecting this profile and scoring it against the selected ICP — this can take up to a minute…");
 
-    const company = p.current_company && p.current_company !== "Not specified" ? p.current_company : "";
-    const result = await apiFetch("/icp-score", {
-      name:                 p.name,
-      country:              p.country,
-      position:             p.position,
-      headline:             p.headline,
-      about:                p.about && p.about !== "Not specified" ? p.about : "",
-      current_company_name: company,
-      current_company:      company,
-      profile_url:          p.profileUrl,
-      profileUrl:           p.profileUrl,
-    });
-    const kCount = countKeywords(saved);
-    await saveStoredScore("icp", { result, keywordCount: kCount }, scoreKey);
+    // One call. The admin backend collects, scores against the ICP selected there,
+    // stores the analysis and hands it back. Nothing is scored in this panel, which
+    // is why the number here always equals the number in the admin.
+    const res = await new Promise((resolve) =>
+      chrome.runtime.sendMessage({ type: "li-admin", action: "analyze",
+        profileUrl: p.profileUrl, scraped: p, collect: true }, resolve));
+    if (!res) throw new Error("Extension was reloaded — refresh this LinkedIn tab");
+    if (!res.ok) throw new Error(res.error || "The admin backend could not be reached");
+    const out = res.data || {};
+    if (out.success === false) throw new Error(out.message || "This profile could not be analyzed");
+
+    await saveStoredScore("icp", out, scoreKey);
     updateLead(p.profileUrl, p.name, Object.assign(leadProfileFields(p, null), {
       headline: p.headline || "",
-      company,
-      icpScore: result.icp_score || 0,
-    }), () => pushLeadToAdmin(p.profileUrl, p.name));
+      company: p.current_company && p.current_company !== "Not specified" ? p.current_company : "",
+      icpScore: out.score || 0,
+      icpBand: out.bandLabel || "",
+      adminLeadId: out.leadId || "",
+    }));
     if (currentProfileSlug() !== slug || !document.getElementById("li-icp-body")) return;   // saved; nothing to show here
-    renderIcpResult(result, kCount, null, { fresh: true });
+    renderIcpResult(out, 0, null, { fresh: true });
   } catch (err) {
-    setIcpStatus(`❌ ${err.message}`);
+    setIcpStatus("❌ " + err.message);
     const b = document.getElementById("li-icp-calc");
     if (b) b.textContent = "🎯 Calculate ICP Score";
     setBusy(ICP_ACTIONS, false);
@@ -1696,7 +1695,108 @@ function scoreRowsHTML(rows, fullColor) {
   }).join("");
 }
 
+// ─── Backend analysis: shown exactly as the admin stored it ──────────────────
+// Nothing here decides a score or a label. The number, the band, the breakdown
+// and the evidence all come from the admin backend, which is what stops this
+// panel and the admin panel disagreeing about the same person.
+
+function icpMatchedIn(result, category) {
+  return (result.matched || []).filter((m) => m.category === category);
+}
+
+function icpRowDetail(result, category) {
+  const hits = icpMatchedIn(result, category);
+  if (hits.length) return hits.map((m) => `${escHtml(m.value)} +${m.weight}`).join(" · ");
+  const tried = (result.unmatched || []).filter((u) => u.category === category);
+  return tried.length ? `no match (tried ${tried.length})` : "";
+}
+
+function renderAnalysis(out, storedAt, opts) {
+  applyTheme();
+  const body = freshPanelBody("li-icp-body");
+  if (!body) return;
+
+  const result = out.result || {};
+  const score = out.score || 0;
+  const color = score >= 70 ? "var(--li-green)" : score >= 40 ? "var(--li-warn)" : "var(--li-bad)";
+  const rows = (result.breakdown || []).map((b) => ({
+    label: b.label || b.category,
+    score: b.earned || 0,
+    max: b.possible || 0,
+    detail: icpRowDetail(result, b.category),
+  }));
+
+  const matched = result.matched || [];
+  const matchedHTML = matched.length
+    ? matched.map((m) => `<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--li-border);">
+        <span style="min-width:92px;font-size:11px;color:var(--li-muted);text-transform:uppercase;letter-spacing:.03em;">${escHtml(m.category)}</span>
+        <span style="font-weight:600;color:var(--li-fg);">${escHtml(m.value)}</span>
+        <span style="color:var(--li-green);font-weight:600;">+${m.weight}</span>
+        <span style="flex:1;font-size:11.5px;color:var(--li-muted);">${escHtml(m.evidence || "")}</span>
+      </div>`).join("")
+    : `<div class="li-form-note">Nothing on this profile matched the rules in this ICP.</div>`;
+
+  // Fields nobody could collect are listed as unknown, never scored as a zero.
+  const unavailable = out.unavailable || [];
+  const unavailableHTML = unavailable.length
+    ? `<div class="li-form-note" style="border-style:dashed;">Could not be checked: ${
+        unavailable.map((u) => `<strong>${escHtml(u.label || u.field)}</strong>`).join(", ")
+      }. ${escHtml(unavailable[0].reason || "")}</div>`
+    : "";
+
+  const excluded = result.excludedBy
+    ? `<div class="li-form-note" style="border-color:var(--li-warn-border);background:var(--li-warn-bg);color:var(--li-warn-fg);">
+         Excluded by <strong>${escHtml(result.excludedBy.rule)}</strong> — ${escHtml(result.excludedBy.evidence || "")}</div>`
+    : "";
+  const capped = (result.failedRequired || []).length
+    ? `<div class="li-form-note">Required rule not met (${escHtml(result.failedRequired.join(", "))}) — capped from ${result.uncappedScore} to ${result.score}.</div>`
+    : "";
+  const notes = (out.collectionNotes || []).length
+    ? `<div class="li-form-note">${escHtml(out.collectionNotes.join(" · "))}</div>` : "";
+
+  const icp = out.icp || {};
+  const when = out.analyzedAt ? new Date(out.analyzedAt) : null;
+
+  body.innerHTML = `
+    ${storedAt ? `<div class="li-form-note">💾 Stored score from <strong>${escHtml(fmtSavedAt(storedAt))}</strong> — press <strong>Re-analyze</strong> for a fresh one.</div>` : ""}
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <div style="font-size:36px;font-weight:800;color:${color};font-variant-numeric:tabular-nums;letter-spacing:-.02em;">${score}</div>
+        <div>
+          <div style="font-size:11px;color:var(--li-muted);">out of 100 · ${result.earned || 0} of ${result.possible || 0} points</div>
+          <div style="font-size:16px;color:var(--li-fg);font-weight:700;margin-top:2px;">${escHtml(result.bandLabel || out.classification || "")}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button type="button" class="li-btn li-btn-ghost" id="li-icp-edit">✏️ Edit ICP</button>
+        <button type="button" class="li-btn li-btn-green" id="li-icp-recalc">🔄 Re-analyze</button>
+      </div>
+    </div>
+    <div style="font-size:11.5px;color:var(--li-muted);margin-bottom:12px;">
+      Scored by <strong>${escHtml(icp.name || "the selected ICP")}</strong>${icp.version ? ` · version ${icp.version}` : ""}
+      ${when ? ` · ${escHtml(when.toLocaleString())}` : ""}
+      ${out.adminLeadUrl ? ` · <a href="${escAttr(out.adminLeadUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--li-blue);">open in admin</a>` : ""}
+    </div>
+    ${excluded}${capped}${unavailableHTML}${notes}
+    <div style="border-top:1px solid var(--li-border);padding-top:14px;">
+      ${scoreRowsHTML(rows, "var(--li-green)")}
+    </div>
+    <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--li-muted);margin:16px 0 4px;">What matched</h3>
+    ${matchedHTML}
+    ${outreachBlockHTML("icp")}
+  `;
+  const edit = document.getElementById("li-icp-edit");
+  if (edit) edit.onclick = () => openIcpForm();
+  const recalc = document.getElementById("li-icp-recalc");
+  if (recalc) recalc.onclick = () => calculateIcpScore();
+  mountOutreach(body.querySelector(".li-outreach"), { fresh: !!(opts && opts.fresh) });
+}
+
+
 function renderIcpResult(result, keywordCount, storedAt, opts) {
+  // A result from the admin backend carries its own ScoreResult and the ICP that
+  // produced it; anything else is a score stored before the backends were unified.
+  if (result && result.result && result.icp) return renderAnalysis(result, storedAt, opts);
   applyTheme();
   const body = freshPanelBody("li-icp-body");
   if (!body) return;

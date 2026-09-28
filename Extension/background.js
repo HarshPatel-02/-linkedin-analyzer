@@ -53,7 +53,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // popup → {type:"li-admin", action:"status"|"sync"} and content.js → action:"push"
 // → LeadAgent backend. Runs here (not in the page or popup) so host_permissions
 // apply and CORS never blocks.
-const ADMIN_API = "http://127.0.0.1:8001/api";
+// Resolved per request from the saved setting, like the analyzer base, so
+// switching between a local admin and a hosted one needs no code change.
+function adminBase() {
+  return new Promise((res) =>
+    chrome.storage.local.get([LI_SETTINGS_KEY], (r) => res(liAdminBase((r && r[LI_SETTINGS_KEY]) || {}))));
+}
 
 // The admin panel upserts by the profile's /in/<slug>, so one lead or all of them
 // go to the same endpoint in the same shape.
@@ -91,11 +96,12 @@ async function enrichLeads(leads) {
   });
 }
 
-async function adminFetch(path, init) {
+async function adminFetch(path, init, timeoutMs) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
+  const timer = setTimeout(() => ctrl.abort(), Math.max(5000, Math.min(timeoutMs || 15000, 240000)));
   try {
-    const resp = await fetch(ADMIN_API + path, Object.assign({ signal: ctrl.signal }, init));
+    const base = await adminBase();
+    const resp = await fetch(base + path, Object.assign({ signal: ctrl.signal }, init));
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.detail || "admin backend error " + resp.status);
     return data;
@@ -116,6 +122,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const leads = Object.values(r[LI_LEADS_KEY] || {});
         if (!leads.length) { sendResponse({ ok: false, error: "No leads logged yet — analyze a profile first." }); return; }
         sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads(leads)) }) });
+      } else if (msg.action === "analyze") {
+        // The one call that produces a score: the admin collects, scores against
+        // the selected ICP, stores the result and returns it. Collection runs
+        // several LinkedIn fetches, so it gets a long timeout.
+        sendResponse({ ok: true, data: await adminFetch("/extension/analyze", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            profileUrl: msg.profileUrl || "", scraped: msg.scraped || {},
+            collect: msg.collect !== false, icpId: msg.icpId || null,
+          }),
+        }, 220000) });
       } else if (msg.action === "push") {
         // One freshly scored person, sent the moment content.js saves the score.
         // Fire-and-forget: the page never waits for this and never shows its errors,

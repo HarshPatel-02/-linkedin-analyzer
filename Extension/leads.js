@@ -22,6 +22,15 @@ function liApiBase(settings) {
   return liCleanApiBase((settings || {}).apiBase) || LI_API_DEFAULT;
 }
 
+// The admin backend (LeadAgent): it owns the ICP rules, the scoring and the
+// database. Scores shown here come from it, so the extension and the admin panel
+// can never disagree about the same person.
+const LI_ADMIN_DEFAULT = "http://127.0.0.1:8001/api";
+
+function liAdminBase(settings) {
+  return liCleanApiBase((settings || {}).adminBase) || LI_ADMIN_DEFAULT;
+}
+
 const LI_LEADS_KEY = "liLeads";
 const LI_SETTINGS_KEY = "liSettings";
 const LI_DEFAULT_FOLLOWUP_DAYS = 3;
