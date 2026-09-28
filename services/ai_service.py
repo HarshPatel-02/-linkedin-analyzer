@@ -1011,6 +1011,10 @@ def generate_invite_notes(req: dict, tone: str, max_chars: int, profile_url: str
 # want, what the personalisation was drawn from), so this returns all of it at once.
 LEAD_MESSAGE_MAX = 900
 PERSONALIZATION_MAX = 5
+# "[Your Company]", "[Name]" - a fill-in-the-blank left in the draft. The prompt
+# forbids them, but a model still slips one in, and pasting it into LinkedIn is
+# the kind of mistake that cannot be taken back, so it is checked rather than trusted.
+PLACEHOLDER_RE = re.compile(r'\[[^]]{2,40}\]')
 
 LEAD_MESSAGE_FIELDS = ("name", "headline", "about", "company", "job_title", "industry",
                        "location", "profile_url", "experience", "skills", "recent_activity")
@@ -1127,6 +1131,11 @@ def generate_lead_message(req: dict) -> dict:
         data = _json_object(re.sub(r"^```(?:json)?\s*|\s*```$", "", (content or "").strip(), flags=re.I))
         if isinstance(data, dict):
             result = _clean_lead_message(data, has_convo, max_chars)
-            if result["suggested_message"]:
+            message = result["suggested_message"]
+            if message and PLACEHOLDER_RE.search(message):
+                # Ask again rather than hand over a draft with a blank to fill in.
+                last_error = "AI left a placeholder in the message - try again"
+                continue
+            if message:
                 return result
     raise Exception(last_error)

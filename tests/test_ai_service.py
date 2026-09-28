@@ -431,3 +431,29 @@ def test_lead_message_without_a_message_is_an_error(monkeypatch):
     _stub_lead_message(monkeypatch, {"suggested_message": "   "})
     with pytest.raises(Exception):
         ai.generate_lead_message({**PROFILE, "messages": []})
+
+
+def test_lead_message_rejects_a_draft_with_a_placeholder(monkeypatch):
+    """A "[Your Company]" left in the draft is pasted straight into LinkedIn, so it
+    is retried rather than returned."""
+    calls = {"n": 0}
+    monkeypatch.setattr(ai, "_providers", lambda: [{"name": "Stub", "url": "", "key": "k"}])
+
+    def fake(prompt, deadline=None):
+        calls["n"] += 1
+        msg = ("Hi Brad, at [Your Company] we help care networks." if calls["n"] == 1
+               else "Hi Brad, we help care networks with value-based care reporting.")
+        return json.dumps({"profile_summary": "CEO.", "contact_reason": "Runs clinics.",
+                           "intent": "operations", "recommended_tone": "professional",
+                           "suggested_message": msg, "personalization_points": [], "needs_review": True})
+    monkeypatch.setattr(ai, "_call_ai", fake)
+    out = ai.generate_lead_message({**PROFILE, "messages": []})
+    assert calls["n"] == 2                       # the first draft was thrown away
+    assert "[" not in out["suggested_message"]
+
+
+def test_lead_message_gives_up_if_every_draft_has_a_placeholder(monkeypatch):
+    _stub_lead_message(monkeypatch, {"suggested_message": "Hi [Name], quick question.",
+                                     "recommended_tone": "professional"})
+    with pytest.raises(Exception):
+        ai.generate_lead_message({**PROFILE, "messages": []})
