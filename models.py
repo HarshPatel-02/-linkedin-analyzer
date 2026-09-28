@@ -41,6 +41,7 @@ class ProfileData(BaseModel):
     country:            str   = ""
     position:           str   = ""
     headline:           str   = ""
+    industry:           str   = ""   # from the company lookup - a profile page never shows it
     about:              str   = ""
     current_company:    str   = ""
     education:          str   = ""
@@ -191,6 +192,18 @@ class LeadMessageRequest(BaseModel):
     goal:            str = ""                 # what the admin wants from this message
     sender_role:     str = ""
     max_chars:       int = 900
+
+
+class CollectRequest(BaseModel):
+    """Collect one LinkedIn profile: the admin backend asks, this service fetches.
+
+    No ICP scoring happens here - that belongs to whoever owns the ICP rules. This
+    returns the facts (profile, posts, company, activity) and says plainly which of
+    them could not be collected.
+    """
+    profile_url: str = ""
+    max_posts:   int = 20
+    scraped:     dict = {}     # what the extension could read off the page
 
 
 class PitchConfig(BaseModel):
