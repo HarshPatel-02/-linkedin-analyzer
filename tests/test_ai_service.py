@@ -356,3 +356,78 @@ def test_parse_reply_metadata_tolerates_missing_or_odd_values():
     _, _, _, meta2 = ai._parse_reply_full(
         '{"tone": "salesy", "needs_follow_up": "false", "suggestions": ["a long enough suggestion here"]}')
     assert meta2["tone"] == "" and meta2["needs_follow_up"] is False
+
+
+# ─── Admin panel: one message per lead ────────────────────────────────────────
+PROFILE = {"name": "Brad Hively", "headline": "Healthcare executive", "job_title": "CEO",
+           "company": "CarePath Health", "industry": "Healthcare", "location": "Los Angeles",
+           "about": "Building patient-first care networks", "recent_activity": "Posted about clinic staffing"}
+
+
+def _stub_lead_message(monkeypatch, payload):
+    monkeypatch.setattr(ai, "_providers", lambda: [{"name": "Stub", "url": "", "key": "k"}])
+    monkeypatch.setattr(ai, "_call_ai", lambda prompt, deadline=None: json.dumps(payload))
+
+
+def test_lead_message_first_contact_has_no_conversation(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(ai, "_providers", lambda: [{"name": "Stub", "url": "", "key": "k"}])
+
+    def fake(prompt, deadline=None):
+        captured["system"] = prompt[0]["content"]
+        captured["user"] = prompt[1]["content"]
+        return json.dumps({"conversation_exists": False, "profile_summary": "CEO of a care network.",
+                           "contact_reason": "He runs clinics and posts about staffing.",
+                           "intent": "improving clinic operations", "recommended_tone": "professional",
+                           "suggested_message": "Saw your post on clinic staffing - we work with care networks on exactly that. Open to comparing notes?",
+                           "personalization_points": ["Recent activity: posted about clinic staffing"],
+                           "needs_review": True})
+    monkeypatch.setattr(ai, "_call_ai", fake)
+    out = ai.generate_lead_message({**PROFILE, "messages": []})
+    assert out["conversation_exists"] is False
+    assert "NO previous conversation" in captured["system"]
+    assert "(none - this is the first message)" in captured["user"]
+    assert "Los Angeles" in captured["user"] and "CarePath Health" in captured["user"]
+    assert out["suggested_message"].startswith("Saw your post")
+    assert out["personalization_points"] == ["Recent activity: posted about clinic staffing"]
+    assert out["needs_review"] is True
+
+
+def test_lead_message_reply_uses_the_latest_message(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(ai, "_providers", lambda: [{"name": "Stub", "url": "", "key": "k"}])
+
+    def fake(prompt, deadline=None):
+        captured["user"] = prompt[1]["content"]
+        return json.dumps({"conversation_exists": True, "profile_summary": "CEO.", "contact_reason": "He replied.",
+                           "intent": "asking about pricing", "recommended_tone": "friendly",
+                           "suggested_message": "Pricing depends on how many clinics you run - how many sites are you covering?",
+                           "personalization_points": ["Their last message asked about pricing"], "needs_review": True})
+    monkeypatch.setattr(ai, "_call_ai", fake)
+    msgs = [{"sender": "me", "text": "Happy to share how we help care networks."},
+            {"sender": "them", "name": "Brad Hively", "text": "What does it cost?"}]
+    out = ai.generate_lead_message({**PROFILE, "messages": msgs})
+    assert out["conversation_exists"] is True
+    assert "LATEST_MESSAGE" in captured["user"] and captured["user"].rstrip().endswith("What does it cost?")
+    assert out["recommended_tone"] == "friendly"
+
+
+def test_lead_message_clamps_untrusted_model_output(monkeypatch):
+    _stub_lead_message(monkeypatch, {
+        "conversation_exists": True,                      # ignored: there is no conversation
+        "recommended_tone": "aggressive",                  # off-list
+        "suggested_message": "A perfectly fine opening message.",
+        "personalization_points": "Headline: CEO",         # a string, not a list
+        "needs_review": False,                             # a human still sends it
+    })
+    out = ai.generate_lead_message({**PROFILE, "messages": []})
+    assert out["conversation_exists"] is False
+    assert out["recommended_tone"] == "professional"
+    assert out["personalization_points"] == ["Headline: CEO"]
+    assert out["needs_review"] is True
+
+
+def test_lead_message_without_a_message_is_an_error(monkeypatch):
+    _stub_lead_message(monkeypatch, {"suggested_message": "   "})
+    with pytest.raises(Exception):
+        ai.generate_lead_message({**PROFILE, "messages": []})
