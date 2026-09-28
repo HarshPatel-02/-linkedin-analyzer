@@ -46,7 +46,7 @@ def _icp_reasons(breakdown: dict) -> list[str]:
     return reasons
 
 
-def _activity_block(profile: ProfileData, raw_data: dict, posts_data: list, score: dict) -> dict:
+def activity_block(profile: ProfileData, raw_data: dict, posts_data: list, score: dict) -> dict:
     """Activity as it can actually be evidenced, or an explicit 'not available'."""
     posts = dedupe_posts(posts_data, (raw_data or {}).get("posts") if isinstance((raw_data or {}).get("posts"), list) else [])
     own, reposted = split_own_posts(posts, profile.profileUrl)
@@ -115,7 +115,7 @@ def analyze_profile(profile: ProfileData, raw_data: dict | None, posts_data: lis
     activity_score_100 = round(100 * (activity["score_total"] or 0) / 100)   # already scaled to 100
     overall = round(OVERALL_WEIGHTS["icp"] * icp_score + OVERALL_WEIGHTS["activity"] * activity_score_100)
 
-    act_block = _activity_block(profile, raw_data, posts_data, activity)
+    act_block = activity_block(profile, raw_data, posts_data, activity)
     reasons = _icp_reasons(icp["breakdown"]) + act_block["activity_reasons"]
 
     return {
