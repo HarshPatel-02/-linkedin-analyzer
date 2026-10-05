@@ -203,12 +203,15 @@ function headlineFromLines(topCard, name, location) {
   return "";
 }
 
-function scrapeLocation(topCard, headline) {
+function scrapeLocation(topCard, headline, name) {
   // Some layouts print the "Contact info" link on the same line as the location
   const strip = (t) => cleanLine(String(t || "").replace(/\s*[·•]?\s*contact info\s*$/i, ""));
-  const ok = (t) => !!t && t.length > 2 && t.length < 100 && t !== headline &&
+  // A location is "City", "City, Region" or "City, Region, Country". Accepting any line
+  // with a comma also accepted a credential list - "Safa Hegazin MD, FACP, DipABOM,
+  // DipABLM, NCMP" was stored as the location, and geography then never matched.
+  const ok = (t) => !!t && t.length > 2 && t.length < 100 && t !== headline && t !== name &&
     !COUNT_LINE_RE.test(t) && !UI_LINE_RE.test(t) && !/contact info|[|@]/i.test(t) &&
-    (/,/.test(t) || LOCATION_WORD_RE.test(t));
+    ((/,/.test(t) && t.split(",").length <= 3) || LOCATION_WORD_RE.test(t));
   const smalls = [...topCard.querySelectorAll('[class*="text-body-small"]')]
     .filter((el) => !el.closest("button, a, " + OUR_UI_SEL));
   const ci = topCard.querySelector('#top-card-text-details-contact-info, a[href*="contact-info"]');
@@ -222,15 +225,31 @@ function scrapeLocation(topCard, headline) {
   return lines.slice(start, start + 8).find(ok) || "";
 }
 
+// A letter group that is a qualification, not a person: "Sarah Lee, MD, FACP and Tom
+// Ray" is two mutual connections, not four. Initials ("Lee, A., Ray, B.") belong to a
+// name too, so they are dropped from the count the same way.
+const NOT_A_NAME = /^(?:[A-Za-z]\.?|[A-Z][A-Za-z]?\.|[A-Z&.]{2,6}|PhD|MD|MBA|MSc|BSc|BA|MA|RN|CPA|Esq|Jr|Sr|I{1,3}|IV)\.?$/;
+
+function countNamedPeople(list) {
+  return String(list || "")
+    .split(/\s*,\s*|\s+\band\b\s+/i)
+    .map((part) => part.trim())
+    .filter((part) => part && !NOT_A_NAME.test(part))
+    .length;
+}
+
 function parseMutualText(txt) {
   const num = (s) => parseInt(String(s || "").replace(/,/g, ""), 10) || 0;
   let m;
-  if ((m = txt.match(/and\s+([\d,]+)\s+others?\s+mutual/i))) {
+  // "Sarah Lee and 12 others are mutual connections". LinkedIn puts "are" between
+  // "others" and "mutual"; the old pattern required them adjacent, so it never matched
+  // and thirteen mutual connections were read as the two fragments either side of "and".
+  if ((m = txt.match(/and\s+([\d,]+)\s+others?\s+(?:(?:are|is)\s+)?(?:a\s+)?mutual/i))) {
     const named = (txt.split(/\s+and\s+[\d,]+\s+others?/i)[0] || "").split("\n").pop();
-    return named.split(",").filter((s) => s.trim()).length + num(m[1]);
+    return countNamedPeople(named) + num(m[1]);
   }
   if ((m = txt.match(/(?:^|\n)\s*([^\n]+?)\s+are\s+mutual\s+connections?/i))) {
-    return m[1].split(/,|\band\b/).filter((s) => s.trim()).length;
+    return countNamedPeople(m[1]);
   }
   if (/\bis\s+a\s+mutual\s+connection/i.test(txt)) return 1;
   if ((m = txt.match(/([\d,]+)\s+mutual\s+connections?/i))) return num(m[1]);
@@ -287,7 +306,7 @@ function scrapeProfile() {
   result.mutual_connections = scrapeMutualConnections(topCard);
   result.avatar = scrapeAvatar(topCard);
   result.headline = scrapeHeadline(topCard, mainEl, nameEl, result.name);
-  result.country = scrapeLocation(topCard, result.headline);
+  result.country = scrapeLocation(topCard, result.headline, result.name);
   if (!result.headline) result.headline = headlineFromLines(topCard, result.name, result.country);
 
   const aboutSec = findSection("About", "about");
@@ -344,11 +363,13 @@ function injectStyles() {
       --li-border:#e5e7eb; --li-border-2:#d1d5db; --li-surface:#f9fafb; --li-surface-2:#f3f4f6;
       --li-input-bg:#fff; --li-track:#e5e7eb; --li-thumb:#d1d5db;
       --li-blue:#0a66c2; --li-green:#059669; --li-purple:#7c3aed; --li-purple-fg:#fff;
+      --li-sel:rgba(10,102,194,.18);
       --li-blue-fill:#0a66c2; --li-blue-fg:#fff;
       --li-green-fill:#059669; --li-green-fg:#fff;
       --li-ok:#16a34a; --li-warn:#f59e0b; --li-bad:#dc2626;
       --li-chip-bg:#ecfdf5; --li-chip-fg:#059669; --li-kw-fg:#047857;
       --li-warn-bg:#fffbeb; --li-warn-fg:#92400e; --li-warn-border:#fcd34d;
+      --li-bad-bg:#fef2f2; --li-bad-fg:#991b1b;
       --li-shadow:rgba(0,0,0,.06); --li-hover:#f3f4f6;
     }
     :root[data-li-theme="dark"]{
@@ -356,11 +377,13 @@ function injectStyles() {
       --li-border:#363c42; --li-border-2:#454c53; --li-surface:#23282d; --li-surface-2:#2b3136;
       --li-input-bg:#2b3136; --li-track:#363c42; --li-thumb:#454c53;
       --li-blue:#6cb1ff; --li-green:#45c08b; --li-purple:#a78bfa; --li-purple-fg:#101418;
+      --li-sel:rgba(108,177,255,.26);
       --li-blue-fill:#6cb1ff; --li-blue-fg:#101418;
       --li-green-fill:#45c08b; --li-green-fg:#101418;
       --li-ok:#4ade80; --li-warn:#fbbf24; --li-bad:#f87171;
       --li-chip-bg:#103326; --li-chip-fg:#45c08b; --li-kw-fg:#45c08b;
       --li-warn-bg:#3a2f10; --li-warn-fg:#fde68a; --li-warn-border:#a16207;
+      --li-bad-bg:#3a1414; --li-bad-fg:#fca5a5;
       --li-shadow:rgba(0,0,0,.45); --li-hover:#2b3136;
     }
     #li-ai-analyze-btn, #li-icp-btn {
@@ -385,7 +408,16 @@ function injectStyles() {
     .panel-header span{font-weight:700;font-size:20px!important;letter-spacing:-.2px;}
     .panel-close{background:none;border:none;color:#fff;font-size:24px!important;cursor:pointer;line-height:1;padding:0 4px;opacity:.7;}
     .panel-close:hover{opacity:1;}
-    .panel-body{padding:22px;max-height:80vh;overflow-y:auto;font-size:16px!important;color:var(--li-fg);}
+    .panel-body{padding:22px;max-height:80vh;overflow-y:auto;font-size:16px!important;color:var(--li-fg);
+      scrollbar-width:thin;scrollbar-color:var(--li-border) transparent;}
+    .panel-body::-webkit-scrollbar{width:11px;}
+    .panel-body::-webkit-scrollbar-track{background:transparent;}
+    .panel-body::-webkit-scrollbar-thumb{background:var(--li-border);border-radius:999px;
+      border:3px solid var(--li-bg);}
+    .panel-body::-webkit-scrollbar-thumb:hover{background:var(--li-muted-2);}
+    #li-icp-panel ::selection,#li-ai-panel ::selection{background:var(--li-sel);color:var(--li-fg);}
+    #li-icp-panel :focus-visible,#li-ai-panel :focus-visible{outline:2px solid var(--li-blue);
+      outline-offset:2px;border-radius:8px;}
     .li-profile-card{display:flex;gap:16px;padding:18px;border:1px solid var(--li-border);border-radius:10px;margin-bottom:16px;align-items:flex-start;}
     .li-avatar{width:80px;height:80px;border-radius:999px;object-fit:cover;flex-shrink:0;}
     .li-profile-info{flex:1;}
@@ -405,8 +437,13 @@ function injectStyles() {
     .li-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;text-align:left;}
     .li-form-field{display:flex;flex-direction:column;gap:4px;min-width:0;}
     .li-form-field.full{grid-column:1 / -1;}
+    .li-form-status:empty{display:none;}
     .li-form-label{font-size:11px!important;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--li-muted);}
-    .li-form-label span{color:var(--li-muted);font-weight:500;text-transform:none;letter-spacing:0;}
+    /* The hint carries the same colour as the label so it keeps its contrast; a rule
+       separates them, because matching weight and size alone read as one run-on line. */
+    .li-form-label span{color:var(--li-muted);font-weight:400;text-transform:none;letter-spacing:0;margin-left:8px;}
+    .li-form-label span::before{content:"";display:inline-block;width:1px;height:10px;
+      margin-right:8px;vertical-align:-1px;background:var(--li-border);}
     .li-form-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}
     .li-pts{flex-shrink:0;padding:1px 8px;border-radius:999px;background:var(--li-chip-bg);color:var(--li-chip-fg);font-size:11px!important;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;cursor:help;}
     .li-pts.blue{background:rgba(10,102,194,.1);color:var(--li-blue);}
@@ -446,6 +483,35 @@ function injectStyles() {
     .li-kw-addbtn:hover{background:var(--li-green-fill);color:var(--li-green-fg);}
     .li-kw-addbtn:focus-visible{outline:2px solid var(--li-green);outline-offset:2px;}
     @media (prefers-reduced-motion:reduce){.li-kw-chip.dupe{animation:none;}}
+    /* The same chips, read-only: these are the admin's rules, not an editor. */
+    .li-kw.ro{cursor:default;background:var(--li-surface);}
+    .li-kw.ro:focus-within{border-color:var(--li-border-2);box-shadow:none;}
+    .li-kw.ro .li-kw-text{cursor:default;}
+    .li-kw-w{margin-left:5px;font-size:11px!important;font-weight:800;font-variant-numeric:tabular-nums;}
+    /* The weight, editable in place: same pill, the number becomes an input. */
+    .li-kw-w-in{width:3.4ch;margin-left:0;padding:0;border:0;background:transparent;color:inherit;
+      font:inherit;font-size:11px!important;font-weight:800;text-align:right;font-variant-numeric:tabular-nums;
+      -moz-appearance:textfield;appearance:textfield;text-decoration:underline dotted;text-underline-offset:3px;}
+    .li-kw-w-in::-webkit-outer-spin-button,.li-kw-w-in::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
+    .li-kw-w-in:focus{outline:none;text-decoration:none;box-shadow:inset 0 0 0 1.5px currentColor;border-radius:4px;}
+    .li-btn.li-rules-dirty{color:var(--li-warn-fg);background:var(--li-warn-bg);border-color:var(--li-warn-border);}
+    .li-kw-chip.req{box-shadow:inset 0 0 0 1.5px currentColor;}
+    .li-kw-chip.ex,.li-kw-chip.b-lo{background:var(--li-bad-bg);color:var(--li-bad-fg);}
+    .li-kw-chip.b-mid{background:var(--li-warn-bg);color:var(--li-warn-fg);}
+    .li-max{flex-shrink:0;padding:1px 8px;border-radius:999px;background:var(--li-chip-bg);color:var(--li-chip-fg);
+      font-size:11px!important;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;}
+    .li-rules{margin-top:14px;padding-top:14px;border-top:1px solid var(--li-border);}
+    /* The tiers of one group read as a set; the group heading says the best one wins. */
+    .li-group{margin-bottom:14px;}
+    .li-group-head{font-size:11px!important;font-weight:700;text-transform:uppercase;letter-spacing:.6px;
+      color:var(--li-muted-2);margin-bottom:6px;}
+    .li-group-head span{text-transform:none;letter-spacing:0;font-weight:500;color:var(--li-muted);}
+    .li-field{margin-bottom:8px;}
+    .li-field-off{margin-left:auto;margin-right:6px;padding:1px 8px;border-radius:999px;border:1px solid var(--li-border-2);
+      background:transparent;color:var(--li-muted);font:inherit;font-size:11px!important;font-weight:700;cursor:pointer;}
+    .li-field-off[aria-pressed="true"]{background:var(--li-surface-2);color:var(--li-muted-2);}
+    .li-req{padding:0 6px;border-radius:999px;background:var(--li-warn-bg);color:var(--li-warn-fg);
+      font-size:10px!important;font-weight:700;text-transform:uppercase;letter-spacing:.4px;}
     .li-kw.blue:focus-within{border-color:var(--li-blue);box-shadow:0 0 0 2px rgba(10,102,194,.15);}
     .li-kw.blue .li-kw-chip{background:rgba(10,102,194,.1);color:var(--li-blue);}
     .li-kw.blue .li-kw-x:hover{background:rgba(10,102,194,.18);}
@@ -456,12 +522,14 @@ function injectStyles() {
     .li-sig-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 14px;}
     .li-sig-share{display:inline-flex;align-items:center;flex-shrink:0;padding:2px 9px;border-radius:999px;background:rgba(10,102,194,.12);color:var(--li-blue);font-size:11px!important;font-weight:700;line-height:1.4;font-variant-numeric:tabular-nums;}
     @media (max-width:660px){.li-sig-grid{grid-template-columns:1fr;}}
-    .li-input,.li-textarea{width:100%;box-sizing:border-box;border:1px solid var(--li-border-2);border-radius:6px;padding:7px 9px;font-size:13px!important;font-family:inherit;color:var(--li-fg);background:var(--li-input-bg);text-align:left;}
+    .li-input,.li-textarea,.li-select{width:100%;box-sizing:border-box;border:1px solid var(--li-border-2);border-radius:6px;padding:7px 9px;font-size:13px!important;font-family:inherit;color:var(--li-fg);background:var(--li-input-bg);text-align:left;}
+    .li-select{appearance:none;background-image:none;cursor:pointer;padding-right:26px;}
     .li-textarea{min-height:72px;max-height:190px;resize:vertical;line-height:1.45;}
     .li-input:focus,.li-textarea:focus{outline:none;border-color:var(--li-blue);box-shadow:0 0 0 2px rgba(10,102,194,.15);}
     .li-input[readonly]{background:var(--li-surface-2);color:var(--li-muted);}
     .li-form-status{font-size:12px!important;color:var(--li-muted);margin-top:10px;min-height:16px;line-height:1.5;text-align:left;word-break:break-word;}
     .li-form-status a,.li-form-status code{color:var(--li-blue);}
+    .li-status-inline:empty{display:none;}
     .li-form-actions{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:14px;flex-wrap:wrap;}
     .li-btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 14px;border-radius:999px;border:1.5px solid transparent;font-size:13px!important;font-weight:600;font-family:inherit;cursor:pointer;background:var(--li-input-bg);transition:all .15s ease;white-space:nowrap;}
     .li-btn:disabled{opacity:.55;cursor:default;}
@@ -529,6 +597,44 @@ function injectStyles() {
     .li-outreach button:focus-visible{outline:2px solid var(--li-blue);outline-offset:2px;}
     @media (prefers-reduced-motion:reduce){.li-outreach-skel{animation:none;}}
 
+    /* ── Calculating: the result's outline while the score is worked out ── */
+    .panel-body.li-is-loading > :not(.li-loading){display:none!important;}
+    .li-loading{--li-accent:var(--li-blue);text-align:left;}
+    .li-loading-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:18px;}
+    .li-loading-spin{flex-shrink:0;width:18px;height:18px;margin-top:1px;box-sizing:border-box;border-radius:50%;
+      border:2px solid var(--li-track);border-top-color:var(--li-accent);animation:li-spin .8s linear infinite;}
+    .li-loading-copy{flex:1;min-width:0;}
+    .li-loading-title{font-size:15px!important;font-weight:700;color:var(--li-fg);line-height:1.3;}
+    .li-loading-stage{margin-top:3px;font-size:12.5px!important;color:var(--li-muted);line-height:1.45;}
+    .li-loading-time{flex-shrink:0;font-size:12px!important;font-weight:600;color:var(--li-muted);font-variant-numeric:tabular-nums;}
+    .li-loading-hero{display:flex;align-items:center;gap:14px;padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid var(--li-border);}
+    .li-skel{display:block;height:10px;border-radius:4px;background:var(--li-surface-2);animation:li-pulse 1.4s ease-in-out infinite;}
+    .li-skel-num{width:56px;height:40px;border-radius:8px;}
+    .li-skel-lines{display:flex;flex-direction:column;gap:8px;}
+    .li-skel-lines .li-skel{width:132px;}
+    .li-skel-lines .li-skel.short{width:84px;}
+    .li-loading-row{margin-bottom:18px;}
+    .li-loading-label{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;
+      font-size:13px!important;font-weight:600;color:var(--li-muted);}
+    .li-skel-pts{width:34px;}
+    .li-loading-track{position:relative;height:6px;border-radius:999px;background:var(--li-track);overflow:hidden;}
+    .li-loading-track::after{content:"";position:absolute;top:0;bottom:0;left:0;width:40%;border-radius:inherit;
+      background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--li-accent) 55%,transparent),transparent);
+      transform:translateX(-100%);animation:li-sweep 1.8s cubic-bezier(.4,0,.2,1) infinite;animation-delay:calc(var(--i,0) * 110ms);}
+    @keyframes li-sweep{to{transform:translateX(260%);}}
+    .li-loading-note{font-size:11.5px!important;color:var(--li-muted);line-height:1.5;}
+    /* A score just calculated fills in: each bar grows to its share, the total counts up. */
+    .panel-body.li-fresh{animation:li-fade-in .24s ease-out;}
+    .li-fresh .li-bar-fill{animation:li-bar-in .7s cubic-bezier(.16,1,.3,1) both;animation-delay:calc(var(--i,0) * 55ms + 80ms);}
+    @keyframes li-fade-in{from{opacity:0;}}
+    @keyframes li-bar-in{from{clip-path:inset(0 100% 0 0);}to{clip-path:inset(0 0 0 0);}}
+    @media (prefers-reduced-motion:reduce){
+      .li-loading-spin{border-color:var(--li-accent);animation:li-pulse 1.4s ease-in-out infinite;}
+      .li-loading-track::after{display:none;}
+      .li-skel{animation:none;}
+      .li-fresh .li-bar-fill{animation:none;}
+    }
+
     /* ── Keyboard focus + scrollbars (panels, forms, ✨ popup, AI note) ── */
     #li-ai-analyze-btn:focus-visible,#li-icp-btn:focus-visible,.li-btn:focus-visible,
     .li-ai-popup button:focus-visible,.li-spark-invite:focus-visible,.li-spark-btn:focus-visible{outline:2px solid var(--li-blue);outline-offset:2px;}
@@ -538,6 +644,29 @@ function injectStyles() {
     .li-ai-popup::-webkit-scrollbar{width:6px;}
     .li-ai-popup::-webkit-scrollbar-thumb{background:var(--li-thumb);border-radius:3px;}
     .li-ai-popup svg{display:block;}
+
+    /* ── Signed out: what the score panels and the ✨ popup show instead ── */
+    .li-signout{text-align:left;}
+    .li-signout-lock{display:flex;align-items:center;justify-content:center;width:38px;height:38px;
+      margin-bottom:14px;border-radius:999px;background:var(--li-surface-2);color:var(--li-purple);}
+    .li-signout-title{font-size:16px!important;font-weight:700;color:var(--li-fg);margin-bottom:6px;letter-spacing:-.1px;}
+    .li-signout-text{font-size:13.5px!important;color:var(--li-fg-2);line-height:1.55;margin:0 0 16px;max-width:52ch;}
+    .li-signout-btn{display:inline-flex;align-items:center;gap:7px;padding:8px 16px;border:1px solid var(--li-purple);
+      border-radius:999px;background:var(--li-purple);color:var(--li-purple-fg);font-family:inherit;font-size:13px;
+      font-weight:600;cursor:pointer;transition:filter .15s ease;}
+    .li-signout-btn:hover{filter:brightness(1.08);}
+    .li-signout-btn[disabled]{opacity:.6;cursor:default;filter:none;}
+    .li-signout-hint{margin-top:10px;font-size:12px!important;color:var(--li-muted);line-height:1.5;}
+    /* The ✨ popup is 260-480px wide, so the same block goes quieter there. */
+    .li-ai-popup .li-signout-lock{width:30px;height:30px;margin-bottom:10px;}
+    .li-ai-popup .li-signout-title{font-size:13.5px!important;margin-bottom:4px;}
+    .li-ai-popup .li-signout-text{font-size:12.5px!important;margin-bottom:12px;}
+    .li-ai-popup .li-signout-btn{padding:6px 13px;font-size:12px;}
+    .li-ai-popup .li-signout-hint{font-size:11.5px!important;}
+    .li-signout-close{position:absolute;top:8px;right:8px;width:24px;height:24px;display:flex;align-items:center;
+      justify-content:center;border:none;border-radius:999px;background:none;color:var(--li-muted);
+      font-size:17px;line-height:1;cursor:pointer;}
+    .li-signout-close:hover{background:var(--li-hover);color:var(--li-fg);}
   `;
   document.head.appendChild(style);
 }
@@ -549,6 +678,29 @@ function injectStyles() {
 function isProfilePage() { return /^\/in\/[^/]+\/?(overlay\/.*)?$/i.test(location.pathname); }
 
 function currentProfileSlug() { return liLeadSlug(location.href); }
+
+// "kristin-bryce-6b5a7a26" → "Kristin Bryce". A readable name from the URL alone, for
+// the moments when the page's own <h1> cannot be read. The trailing hash LinkedIn adds
+// to disambiguate people is dropped; the admin builds its display names the same way.
+function nameFromSlug(slug) {
+  return String(slug || "").replace(/-?[0-9a-f]{6,}$/i, "")
+    .split(/[-_]+/).filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+// Who a result panel is about. Both panels head their result with this, so they can
+// never disagree about the same person: the first candidate that is a real name wins,
+// then the slug in the URL. "Unknown" is what scrapeProfile answers when LinkedIn's
+// <h1> is not readable — it is the absence of a name, never a name to print.
+function safeScrape() {
+  try { return scrapeProfile(); }
+  catch (e) { console.error("[LI-AI] profile scrape failed", e); return {}; }
+}
+
+function profileDisplayName(...candidates) {
+  return candidates.find((v) => v && v !== "Unknown") || nameFromSlug(currentProfileSlug());
+}
 
 // One canonical URL per person: https://www.linkedin.com/in/<slug>/
 function profileKeyUrl() { return liProfileUrl(location.href) || location.href.split("?")[0]; }
@@ -729,6 +881,7 @@ const PAGE_FIELDS = ["activity", "mutual_connections"];
 function collectActivityFormValues() {
   const out = {};
   for (const f of ACTIVITY_FIELDS) {
+    if (f.readOnly) continue;
     const el = document.getElementById(`li-f-${f.key}`);
     if (el && el.value !== (el.dataset.scraped || "")) out[f.key] = el.value;
   }
@@ -790,8 +943,8 @@ function addAIButton() {
 // Routed through background.js: the extension (not the LinkedIn page) talks to
 // the local server, so Chrome's page → localhost restrictions never apply.
 // Apify scrapes and AI calls are slow; a sleeping Render server adds ~30-50s.
-const API_TIMEOUTS = { "/analyze": 150000, "/icp-score": 120000, "/suggest-messages": 100000, "/outreach-suggestion": 90000,
-  "/icp-config": 70000, "/activity-points": 70000, "/activity-keywords": 70000 };
+const API_TIMEOUTS = { "/analyze": 150000, "/suggest-messages": 100000, "/outreach-suggestion": 90000,
+  "/activity-points": 70000, "/activity-keywords": 70000 };
 
 function apiFetch(path, body) {
   const timeoutMs = API_TIMEOUTS[path] || 45000;
@@ -974,15 +1127,29 @@ function escAttr(str) {
   return escHtml(String(str ?? "")).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-function setIcpStatus(text) {
-  const el = document.getElementById("li-icp-status");
+// "Calculate ICP Score" in the form, "Re-analyze" over an existing result.
+function icpCta() {
+  return document.getElementById("li-icp-recalc") ? "Re-analyze" : "Calculate ICP Score";
+}
+
+// The two score panels are the same panel twice: same shell, same status line, same
+// open/stored/render cycle. Only the ids, the wording and the accent differ, so they
+// are described once here and everything else takes a `kind`.
+const PANELS = {
+  activity: { id: "li-ai-panel",  btnId: "li-ai-analyze-btn", title: "⚡ Activity Score",
+              bodyId: "li-ai-body",  closeId: "li-ai-close",  statusId: "li-ai-status" },
+  icp:      { id: "li-icp-panel", btnId: "li-icp-btn",        title: "🎯 ICP Score",
+              headerColor: "#059669",
+              bodyId: "li-icp-body", closeId: "li-icp-close", statusId: "li-icp-status" },
+};
+
+function setPanelStatus(kind, text) {
+  const el = document.getElementById(PANELS[kind].statusId);
   if (el) el.textContent = text;
 }
 
-function setActivityStatus(text) {
-  const el = document.getElementById("li-ai-status");
-  if (el) el.textContent = text;
-}
+function setIcpStatus(text)      { setPanelStatus("icp", text); }
+function setActivityStatus(text) { setPanelStatus("activity", text); }
 
 function createPanel({ id, btnId, title, headerColor, bodyId, closeId }) {
   let panel = document.getElementById(id);
@@ -1011,8 +1178,99 @@ function freshPanelBody(bodyId) {
   const old = document.getElementById(bodyId);
   if (!old) return null;
   const body = old.cloneNode(false);
+  body.classList.remove("li-is-loading", "li-fresh");
   old.replaceWith(body);
   return body;
+}
+
+// ─── Calculating: the panel shows the score taking shape ─────────────────────
+// A calculation can take up to a minute while the profile and posts are read, and a
+// relabelled button at the bottom of a long form was easy to miss. The panel's content
+// steps aside for the outline of the result - the total and one empty bar per factor -
+// with what is happening now and how long it has taken. The content is hidden, not
+// removed: the calculation still reads the form, and an error brings it back exactly as
+// it was, with the message beside the button that was pressed.
+const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function showScoringLoader(bodyId, { title, stage, rows, accent }) {
+  const body = document.getElementById(bodyId);
+  if (!body) return { stage() {}, restore() {} };
+  body.querySelector(":scope > .li-loading")?.remove();
+  const scrollTop = body.scrollTop;
+  const el = document.createElement("div");
+  el.className = "li-loading";
+  el.setAttribute("role", "status");
+  el.style.setProperty("--li-accent", accent);
+  el.innerHTML = `
+    <div class="li-loading-head">
+      <span class="li-loading-spin" aria-hidden="true"></span>
+      <div class="li-loading-copy">
+        <div class="li-loading-title">${escHtml(title)}</div>
+        <div class="li-loading-stage"></div>
+      </div>
+      <span class="li-loading-time" aria-hidden="true">0s</span>
+    </div>
+    <div class="li-loading-hero" aria-hidden="true">
+      <span class="li-skel li-skel-num"></span>
+      <span class="li-skel-lines"><span class="li-skel"></span><span class="li-skel short"></span></span>
+    </div>
+    <div aria-hidden="true">
+      ${rows.map((label, i) => `
+        <div class="li-loading-row" style="--i:${i}">
+          <div class="li-loading-label"><span>${escHtml(label)}</span><span class="li-skel li-skel-pts"></span></div>
+          <div class="li-loading-track"></div>
+        </div>`).join("")}
+    </div>
+    <div class="li-loading-note">Usually under a minute.</div>`;
+
+  const stageEl = el.querySelector(".li-loading-stage");
+  const timeEl  = el.querySelector(".li-loading-time");
+  const noteEl  = el.querySelector(".li-loading-note");
+  const started = Date.now();
+  let slow = false;
+  const timer = setInterval(() => {
+    if (!el.isConnected) { clearInterval(timer); return; }
+    const s = Math.floor((Date.now() - started) / 1000);
+    timeEl.textContent = s < 60 ? `${s}s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    if (s >= 60 && !slow) { slow = true; noteEl.textContent = "Taking longer than usual — still waiting for the profile data."; }
+  }, 1000);
+
+  stageEl.textContent = stage;
+  body.classList.add("li-is-loading");
+  body.prepend(el);
+  body.scrollTop = 0;
+  return {
+    stage(text) { stageEl.textContent = text; },
+    // Put the panel back as it was: after an error, or when the result belongs to a
+    // profile that is no longer on screen. Once the result has replaced it, a no-op.
+    restore() {
+      clearInterval(timer);
+      if (!el.isConnected) return;
+      el.remove();
+      body.classList.remove("li-is-loading");
+      body.scrollTop = scrollTop;
+    },
+  };
+}
+
+// A score that was just calculated arrives the way it was worked out: the total counts
+// up while each factor's bar fills to its share. A stored score is drawn still.
+function revealFreshScore(body) {
+  if (!body) return;
+  body.classList.add("li-fresh");
+  const num = body.querySelector(".li-score-num");
+  if (!num || reducedMotion() || document.hidden) return;   // a background tab would hold it at 0
+  const to = parseInt(num.textContent, 10) || 0;
+  num.style.minWidth = num.offsetWidth + "px";      // the label beside it must not shift as digits appear
+  const start = performance.now();
+  const tick = (now) => {
+    if (!num.isConnected) return;
+    const t = Math.min(1, (now - start) / 700);
+    num.textContent = t < 1 ? Math.round(to * (1 - Math.pow(2, -10 * t))) : to;
+    if (t < 1) requestAnimationFrame(tick);
+  };
+  num.textContent = 0;
+  requestAnimationFrame(tick);
 }
 
 // ─── Activity Score: form with the details used by scoring_service.py ─────────
@@ -1031,7 +1289,10 @@ const ACTIVITY_FIELDS = [
     rule: (p) => `Engagement: High = ${p} · Medium = ${ptsOf(p, 1, 2)} · Low = ${ptsOf(p, 1, 4)} — High needs 2 of: 10+ likes, 5+ comments, 3+ reposts` },
   { key: "avg_comments",       label: "Avg Comments / Post",   type: "number", hint: "blank = Apify average" },
   { key: "avg_reposts",        label: "Avg Reposts / Post",    type: "number", hint: "blank = Apify average" },
-  { key: "mutual_connections", label: "Mutual Connections",    type: "number", ptsKey: "mutual_connections", def: 10,
+  // Typed like every other field: the page count is pre-filled, and whatever is in the
+  // box when you press Calculate is what gets scored.
+  { key: "mutual_connections", label: "Mutual Connections",    type: "number",
+    hint: "scored from LinkedIn", ptsKey: "mutual_connections", def: 10,
     rule: (p) => `20+ mutual = ${p} · 10-19 = ${ptsOf(p, 7, 10)} · 5-9 = ${ptsOf(p, 5, 10)} · 1-4 = ${ptsOf(p, 2, 10)}` },
 ];
 // Scored from the page (no form field), but its points are editable too
@@ -1189,10 +1450,7 @@ const ACTIVITY_ACTIONS = ["li-ai-refresh", "li-ai-save", "li-ai-calc"];
 
 async function openActivityForm(reset) {
   reset = reset === true;   // a click event must never count as "reset"
-  createPanel({
-    id: "li-ai-panel", btnId: "li-ai-analyze-btn", title: "⚡ Activity Score",
-    bodyId: "li-ai-body", closeId: "li-ai-close",
-  });
+  createPanel(PANELS.activity);
 
   const p     = scrapeProfile();
   const saved = await loadActivityFormValues();
@@ -1205,6 +1463,7 @@ async function openActivityForm(reset) {
       if (!p.position && saved.position) p.position = saved.position;
       continue;
     }
+    if (f.readOnly) continue;                                   // always the page, never an old typed value
     if (!saved._v && PAGE_FIELDS.includes(f.key)) continue;   // stale page value from an old build
     // Posts, Avg Likes, etc. reset to blank on Refresh like the keywords do.
     if (!reset && Object.prototype.hasOwnProperty.call(saved, f.key)) p[f.key] = saved[f.key];
@@ -1320,18 +1579,24 @@ async function calculateActivityScore() {
     avg_likes:          parseFloat(value("avg_likes"))         || 0,
     avg_comments:       parseFloat(value("avg_comments"))      || 0,
     avg_reposts:        parseFloat(value("avg_reposts"))       || 0,
-    mutual_connections: parseInt(value("mutual_connections"), 10) || 0,
+    // Always LinkedIn's own count, never the box: a typed number cannot be checked.
+    mutual_connections: parseInt(p.mutual_connections, 10) || 0,
   };
 
   setBusy(ACTIVITY_ACTIONS, true);
   btn.textContent = "⏳ Calculating…";
-  setActivityStatus("Reading their profile and recent posts this can take up to a minute…");
+  setActivityStatus("");
+  const loading = showScoringLoader("li-ai-body", {
+    title: "Calculating the Activity score", stage: "Saving your points and keywords…",
+    rows: activityFactors({}).map((f) => f.label), accent: "var(--li-blue)",
+  });
 
   try {
     saveActivityFormValues(collectActivityFormValues());
     // Save the points first: the server scores every factor with them
     await apiFetch("/activity-points", readPoints(document.getElementById("li-ai-body")));
     await apiFetch("/activity-keywords", collectSignalKeywords());
+    loading.stage("Reading their profile and recent posts…");
     const data = await apiFetch("/analyze", payload);
     await saveStoredScore("activity", data, scoreKey);
     updateLead(p.profileUrl, data.name || p.name, Object.assign(leadProfileFields(p, data), {
@@ -1339,11 +1604,13 @@ async function calculateActivityScore() {
       company: (data.current_company && data.current_company !== "Not specified") ? data.current_company : (p.current_company || ""),
       activityScore: data.score_total || 0,
       activityLabel: data.score_label || "",
+      activityBreakdown: activityFactors(data),
     }), () => pushLeadToAdmin(p.profileUrl, data.name || p.name));
-    if (currentProfileSlug() !== slug || !document.getElementById("li-ai-body")) return;   // saved; nothing to show here
+    if (currentProfileSlug() !== slug || !document.getElementById("li-ai-body")) { loading.restore(); return; }   // saved; nothing to show here
     renderPanel(data, null, { fresh: true });
   } catch (err) {
     console.error("[LI-AI] ❌", err);
+    loading.restore();
     setActivityStatus(`❌ ${err.message}`);
     const b = document.getElementById("li-ai-calc");
     if (b) b.textContent = "🎯 Calculate Activity Score";
@@ -1351,34 +1618,14 @@ async function calculateActivityScore() {
   }
 }
 
-// ─── ICP Score: form with the keywords used by icp_service.py ────────────────
-// Points per list (`def` = default), editable on each field and saved in
-// icp_config.json → POINTS. A category's max is its best tier.
-const ICP_FIELDS = [
-  { key: "EXACT_INDUSTRIES",             label: "Exact Industries",             hint: "", def: 35, rule: (p) => `Industry Match: an exact industry = ${p}` },
-  { key: "RELATED_INDUSTRIES",           label: "Related Industries",           hint: "", def: 25, rule: (p) => `Industry Match: a related industry = ${p}` },
-  { key: "TIER_1_TITLES",                label: "Tier 1 Titles",                hint: "Top decision makers", def: 25, rule: (p) => `Job Title Match: Tier 1 title = ${p}` },
-  { key: "TIER_2_TITLES",                label: "Tier 2 Titles",                hint: "", def: 20, rule: (p) => `Job Title Match: Tier 2 title = ${p}` },
-  { key: "TIER_3_TITLES",                label: "Tier 3 Titles",                hint: "", def: 15, rule: (p) => `Job Title Match: Tier 3 title = ${p}` },
-  { key: "EXACT_COMPANY_SIZE_KEYWORDS",  label: "Exact Company Size Keywords",  hint: "", def: 15, rule: (p) => `Company Size Match: exact size = ${p}` },
-  { key: "NEARBY_COMPANY_SIZE_KEYWORDS", label: "Nearby Company Size Keywords", hint: "", def: 8,  rule: (p) => `Company Size Match: nearby size = ${p}` },
-  { key: "PRIMARY_GEOGRAPHIES",          label: "Primary Geographies",          hint: "", def: 10, rule: (p) => `Geography Match: primary country = ${p}` },
-  { key: "SECONDARY_GEOGRAPHIES",        label: "Secondary Geographies",        hint: "", def: 5,  rule: (p) => `Geography Match: secondary country = ${p}` },
-  { key: "ALL_ICP_KEYWORDS",             label: "All ICP Keywords",             hint: "About + company + headline", full: true, def: 15,
-    rule: (p) => `Profile Keywords: 5+ matches = ${p} · 3+ = ${ptsOf(p, 2, 3)} · 1+ = ${ptsOf(p, 1, 3)}` },
-].map((f) => ({ ...f, ptsKey: f.key }));
-// Same maths as icp_service.calculate_icp: each category counts its best tier
-const ICP_GROUPS = [["EXACT_INDUSTRIES", "RELATED_INDUSTRIES"], ["TIER_1_TITLES", "TIER_2_TITLES", "TIER_3_TITLES"],
-  ["EXACT_COMPANY_SIZE_KEYWORDS", "NEARBY_COMPANY_SIZE_KEYWORDS"], ["PRIMARY_GEOGRAPHIES", "SECONDARY_GEOGRAPHIES"], ["ALL_ICP_KEYWORDS"]];
-const ICP_TOTAL = (pts) => ICP_GROUPS.reduce((sum, g) => sum + Math.max(...g.map((k) => pts[k] || 0)), 0);
-
 // Each keyword list is a chip editor: × removes a keyword, Enter / comma / Add
 // adds one (paste a list to add many). The hidden textarea keeps one keyword per
-// line, so loading and saving (collectIcpKeywords) read it exactly as before.
+// line, so loading and saving read the list exactly as a plain textarea would.
 const ICON_X_SMALL = '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
 const ICON_PLUS_SMALL = '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>';
 
-// Shared chip editor. `prefix` names the editor family ("li-icp", "li-sig"):
+// Shared chip editor. `prefix` names the editor family ("li-sig" is the only one
+// left, now that ICP rules are edited in the admin):
 // the hidden textarea #<prefix>-<key> holds one keyword per line.
 const KW_ON_EDIT = {};   // prefix → called after every add / remove
 // "<prefix>|<key>" → Set of lowercased keywords switched off. A switched-off
@@ -1515,147 +1762,543 @@ function wireChipEditors(root, prefix, onEdit) {
   });
 }
 
-// ICP keyword lists use the shared editor
-function icpFieldHTML(f) {
-  const cls  = f.full ? "li-form-field full" : "li-form-field";
-  return `<div class="${cls}">
-    ${formHeadHTML(f, `li-icp-${f.key}-new`, "green")}
-    ${kwEditorHTML("li-icp", f.key, f.label, "green")}
-  </div>`;
-}
-const renderIcpChips = (key) => renderChips("li-icp", key);
-function wireIcpChipEditors(form) {
-  wireChipEditors(form, "li-icp", () => setIcpStatus("Unsaved changes — press Save or Calculate ICP Score."));
+// ── Which ICP scores this person ─────────────────────────────────────────────
+// The admin holds several published ICPs and one of them is "the" scoring ICP.
+// Choosing here moves that workspace selection, so the admin shows the same ICP
+// and the same score rather than its own stale idea of which is in force.
+let icpChoices = { icps: [], selected: null, loaded: false, error: "" };
+
+function adminMessage(msg) {
+  return new Promise((resolve) => {
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) return resolve(null);
+      chrome.runtime.sendMessage(Object.assign({ type: "li-admin" }, msg), (res) => {
+        void chrome.runtime.lastError;
+        resolve(res || null);
+      });
+    } catch (e) { resolve(null); }
+  });
 }
 
-const ICP_ACTIONS = ["li-icp-refresh", "li-icp-save", "li-icp-calc"];
+async function loadIcpChoices(force) {
+  // The list rarely changes while a panel is open, so reopening reuses it unless a
+  // refresh is asked for. Every reopen used to refetch.
+  if (icpChoices.loaded && !force && !icpChoices.error) return icpChoices;
+  const res = await adminMessage({ action: "icps" });
+  if (!res || !res.ok) {
+    icpChoices = { icps: [], selected: null, loaded: true, savedId: icpChoices.savedId,
+                   error: (res && res.error) || "admin backend unreachable" };
+    return icpChoices;
+  }
+  const list = (res.data || {}).icps || [];
+  // The response marks which ICP is in force, so no second request is needed.
+  icpChoices = { icps: list, selected: list.find((i) => i.selected) || null,
+                 loaded: true, savedId: icpChoices.savedId, error: "" };
+  return icpChoices;
+}
+
+function chosenIcpId() {
+  const saved = icpChoices.savedId;
+  if (saved && icpChoices.icps.some((i) => i.id === saved)) return saved;
+  if (icpChoices.selected && icpChoices.selected.id) return icpChoices.selected.id;
+  return icpChoices.icps.length === 1 ? icpChoices.icps[0].id : "";
+}
+
+// The dropdown, or an honest note when there is nothing to choose between.
+function icpSelectHTML() {
+  if (!icpChoices.loaded) return '<div class="li-form-note">Loading ICP profiles\u2026</div>';
+  if (icpChoices.error) {
+    return '<div class="li-form-note">Could not reach the admin backend (' + escHtml(icpChoices.error) +
+           '). Set the Admin URL in the extension popup.</div>';
+  }
+  if (!icpChoices.icps.length) {
+    return '<div class="li-form-note">No published ICP profile. Create and publish one in the admin panel, then reopen this.</div>';
+  }
+  const current = chosenIcpId();
+  return '<div class="li-form-field full">' +
+    '<label class="li-form-label" for="li-icp-select">Select ICP Profile ' +
+      '<span>the score is calculated with this profile\u2019s rules</span></label>' +
+    '<select id="li-icp-select" class="li-input li-select">' +
+      icpChoices.icps.map((i) =>
+        '<option value="' + escAttr(i.id) + '"' + (i.id === current ? " selected" : "") + '>' +
+        escHtml(i.name) + (i.version ? " \u00b7 version " + i.version : "") + '</option>').join("") +
+    '</select></div>';
+}
+
+// The dropdown lives in a holder with a fixed id, so it can be redrawn once the
+// ICP list arrives without having to guess which element it was.
+function icpPickHTML() { return '<div id="li-icp-pick">' + icpSelectHTML() + '</div>'; }
+
+function redrawIcpPick(root) {
+  const holder = (root || document).querySelector("#li-icp-pick");
+  if (!holder) return;
+  holder.innerHTML = icpSelectHTML();
+  wireIcpSelect(root || document);
+}
+
+// ── The fields this ICP scores with ──────────────────────────────
+// The same ten fields the backend scores with, in the same order. A field's points
+// belong to the FIELD: any one of its keywords matching earns all of them, and a
+// second match earns nothing more. Fields are grouped, and a group counts only its
+// best field — matching an exact and a related industry is still one industry.
+const ICP_FIELD_VIEW = [
+  { key: "EXACT_INDUSTRIES",             label: "Industry — exact",      group: "industry",    hint: "the industries this ICP is for" },
+  { key: "RELATED_INDUSTRIES",           label: "Industry — related",    group: "industry",    hint: "adjacent, worth less" },
+  { key: "TIER_1_TITLES",                label: "Title — tier 1",        group: "title",       hint: "the people you most want" },
+  { key: "TIER_2_TITLES",                label: "Title — tier 2",        group: "title",       hint: "senior, below tier 1" },
+  { key: "TIER_3_TITLES",                label: "Title — tier 3",        group: "title",       hint: "worth some points" },
+  { key: "EXACT_COMPANY_SIZE_KEYWORDS",  label: "Company size — exact",  group: "companySize", hint: "employee ranges: 1, 2-10, 11-50, 51-200, 201-500, 501-1000…" },
+  { key: "NEARBY_COMPANY_SIZE_KEYWORDS", label: "Company size — nearby", group: "companySize", hint: "still fits, worth less" },
+  { key: "PRIMARY_GEOGRAPHIES",          label: "Geography — primary",   group: "geography",   hint: "where this ICP sells" },
+  { key: "SECONDARY_GEOGRAPHIES",        label: "Geography — secondary", group: "geography",   hint: "other places worth points" },
+  { key: "ALL_ICP_KEYWORDS",             label: "Profile keywords",            group: "keywords",    hint: "anywhere in headline or About" },
+];
+
+const ICP_GROUP_LABELS = {
+  industry: "Industry", title: "Title", companySize: "Company size",
+  geography: "Geography", keywords: "Profile keywords",
+};
+
+const ICP_DEFAULT_POINTS = {
+  EXACT_INDUSTRIES: 35, RELATED_INDUSTRIES: 25,
+  TIER_1_TITLES: 25, TIER_2_TITLES: 20, TIER_3_TITLES: 15,
+  EXACT_COMPANY_SIZE_KEYWORDS: 15, NEARBY_COMPANY_SIZE_KEYWORDS: 8,
+  PRIMARY_GEOGRAPHIES: 10, SECONDARY_GEOGRAPHIES: 5, ALL_ICP_KEYWORDS: 15,
+};
+
+// A field can only score when it is on, worth something, and has something to match.
+const icpFieldCounts = (f) => !!(f && f.enabled && (f.points || 0) > 0 && (f.keywords || []).length);
+const icpFieldMax = (f) => (icpFieldCounts(f) ? f.points : 0);
+
+function icpFieldHTML(view, field, editable) {
+  const f = field || { points: ICP_DEFAULT_POINTS[view.key] || 0, enabled: true, required: false, keywords: [] };
+  const off = !f.enabled;
+  const words = f.keywords || [];
+  const chips = words.length
+    ? words.map((kw) =>
+        '<span class="li-kw-chip' + (off ? " off" : "") + '" data-kw="' + escAttr(kw) + '" role="listitem">' +
+        (editable ? '<button type="button" class="li-kw-text">' : '<span class="li-kw-text">') +
+        escHtml(kw) + (editable ? "</button>" : "</span>") +
+        (editable ? '<button type="button" class="li-kw-x" aria-label="' + escAttr("Remove " + kw) + '">' + ICON_X_SMALL + "</button>" : "") +
+        "</span>").join("")
+    : '<span class="li-kw-empty">No keywords — this field cannot score anyone</span>';
+
+  const points = editable
+    ? '<span class="li-max"><input class="li-kw-w-in" type="number" min="0" max="100" step="1" value="' + (f.points || 0) +
+      '" aria-label="' + escAttr("Maximum points for " + view.label) + '"> pts</span>'
+    : '<span class="li-max">max ' + (f.points || 0) + "</span>";
+
+  const adder = editable
+    ? '<div class="li-kw-add"><input class="li-kw-input" type="text" autocomplete="off" spellcheck="false"' +
+      ' placeholder="' + escAttr("Add a keyword") + '">' +
+      '<button type="button" class="li-kw-addbtn">' + ICON_PLUS_SMALL + "Add</button></div>"
+    : "";
+
+  const toggle = editable
+    ? '<button type="button" class="li-field-off" aria-pressed="' + (off ? "true" : "false") + '">' +
+      (off ? "Off" : "On") + "</button>"
+    : "";
+
+  return '<div class="li-form-field full li-field" data-key="' + escAttr(view.key) + '">' +
+    '<div class="li-form-head"><span class="li-form-label">' + escHtml(view.label) +
+      " <span>" + escHtml(view.hint) + "</span>" + (f.required ? ' <span class="li-req">required</span>' : "") + "</span>" +
+      toggle + points + "</div>" +
+    '<div class="li-kw' + (editable ? "" : " ro") + '">' +
+      '<div class="li-kw-chips" role="list" aria-label="' + escAttr(view.label) + ' keywords">' + chips + "</div>" +
+      adder + "</div></div>";
+}
+
+function icpRulesHTML(editable) {
+  if (icpChoices.configError) {
+    return '<div class="li-form-note">Could not load this ICP’s rules (' + escHtml(icpChoices.configError) + ").</div>";
+  }
+  const icp = icpChoices.config;
+  if (!icp) return '<div class="li-form-note">Loading this ICP’s rules…</div>';
+
+  const cfg = icp.config || {};
+  const fields = editable ? icpDraftFields() : (cfg.fields || {});
+
+  // A group offers its best field only, so the ceiling is the sum of group bests.
+  const groups = [];
+  for (const view of ICP_FIELD_VIEW) {
+    let g = groups.find((x) => x.key === view.group);
+    if (!g) { g = { key: view.group, label: ICP_GROUP_LABELS[view.group], views: [] }; groups.push(g); }
+    g.views.push(view);
+  }
+  const total = groups.reduce(
+    (sum, g) => sum + Math.max.apply(null, [0].concat(g.views.map((v) => icpFieldMax(fields[v.key])))), 0);
+
+  const groupHTML = groups.map((g) =>
+    '<div class="li-group">' +
+      '<div class="li-group-head">' + escHtml(g.label) +
+        (g.views.length > 1 ? " <span>best field counts</span>" : "") + "</div>" +
+      g.views.map((v) => icpFieldHTML(v, fields[v.key], editable)).join("") +
+    "</div>").join("");
+
+  return '<div class="li-rules">' + groupHTML +
+    '<div class="li-pts-total"><span class="li-pts-extra"><span>Scored with</span> ' +
+      escHtml(icp.name || "this ICP") + (icp.version ? " · version " + icp.version : "") + "</span>" +
+      "<span>" + (total
+        ? total + " points possible — the score is the share of them earned"
+        : "No keywords yet — this ICP cannot score anyone") + "</span></div></div>";
+}
+
+// ── Editing the fields ────────────────────────────────────
+// A working copy, so an abandoned edit never becomes the scoring rules. Saving
+// publishes a new ICP version; the admin reads the same one.
+let icpDraft = null;
+
+function icpDraftFields() {
+  if (!icpDraft) {
+    const src = (icpChoices.config && icpChoices.config.config && icpChoices.config.config.fields) || {};
+    icpDraft = { icpId: icpChoices.config && icpChoices.config.id, dirty: false, fields: {} };
+    for (const v of ICP_FIELD_VIEW) {
+      const f = src[v.key] || {};
+      icpDraft.fields[v.key] = {
+        points: f.points == null ? (ICP_DEFAULT_POINTS[v.key] || 0) : f.points,
+        enabled: f.enabled !== false,
+        required: !!f.required,
+        keywords: (f.keywords || []).slice(),
+      };
+    }
+  }
+  return icpDraft.fields;
+}
+
+function icpDraftReset() { icpDraft = null; }
+
+function icpMarkDirty(dirty) {
+  if (icpDraft) icpDraft.dirty = dirty !== false;
+  const save = document.getElementById("li-icp-save");
+  if (save) {
+    save.disabled = !(icpDraft && icpDraft.dirty);
+    save.classList.toggle("li-rules-dirty", !!(icpDraft && icpDraft.dirty));
+  }
+}
+
+function wireRuleEditors(root) {
+  if (!root) return;
+  root.querySelectorAll(".li-field[data-key]").forEach((box) => {
+    const key = box.getAttribute("data-key");
+    const field = () => icpDraftFields()[key];
+
+    const pts = box.querySelector(".li-kw-w-in");
+    if (pts) {
+      pts.oninput = () => {
+        field().points = Math.max(0, Math.min(100, Math.round(Number(pts.value) || 0)));
+        icpMarkDirty();
+        refreshIcpTotal(root);
+      };
+      pts.onblur = () => { pts.value = String(field().points); };
+    }
+
+    const toggle = box.querySelector(".li-field-off");
+    if (toggle) toggle.onclick = () => {
+      field().enabled = !field().enabled;
+      icpMarkDirty();
+      redrawIcpRules(null, true);
+    };
+
+    box.querySelectorAll(".li-kw-chip[data-kw]").forEach((chip) => {
+      const kw = chip.getAttribute("data-kw");
+      const drop = () => {
+        const f = field();
+        f.keywords = f.keywords.filter((k) => k !== kw);
+        icpMarkDirty();
+        redrawIcpRules(null, true);
+      };
+      const text = chip.querySelector(".li-kw-text");
+      if (text) text.onclick = drop;
+      const x = chip.querySelector(".li-kw-x");
+      if (x) x.onclick = drop;
+    });
+
+    const input = box.querySelector(".li-kw-input");
+    const add = () => {
+      const value = (input.value || "").trim();
+      if (!value) return;
+      const f = field();
+      if (f.keywords.some((k) => k.toLowerCase() === value.toLowerCase())) {
+        input.value = "";
+        setIcpStatus("“" + value + "” is already in " + key + ".");
+        return;
+      }
+      f.keywords.push(value);
+      input.value = "";
+      icpMarkDirty();
+      redrawIcpRules(null, true);
+      const again = document.querySelector('.li-field[data-key="' + key + '"] .li-kw-input');
+      if (again) again.focus();
+    };
+    if (input) input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+    const btn = box.querySelector(".li-kw-addbtn");
+    if (btn) btn.onclick = add;
+  });
+}
+
+// The ceiling only changes when a points box does, so it is cheaper to update the
+// one line than to redraw every field and lose the caret.
+function refreshIcpTotal(root) {
+  const el = (root || document).querySelector(".li-pts-total span:last-child");
+  if (!el) return;
+  const fields = icpDraftFields();
+  const seen = {};
+  for (const v of ICP_FIELD_VIEW) {
+    seen[v.group] = Math.max(seen[v.group] || 0, icpFieldMax(fields[v.key]));
+  }
+  const total = Object.keys(seen).reduce((n, g) => n + seen[g], 0);
+  el.textContent = total
+    ? total + " points possible — the score is the share of them earned"
+    : "No keywords yet — this ICP cannot score anyone";
+}
+
+async function saveIcpRules() {
+  if (!icpDraft || !icpDraft.dirty) return;
+  setBusy(["li-icp-save", "li-icp-calc", "li-icp-recalc"], true);
+  setIcpStatus("Saving the fields…");
+  const res = await adminMessage({ action: "save-rules", fields: icpDraft.fields });
+  setBusy(["li-icp-save", "li-icp-calc", "li-icp-recalc"], false);
+  if (!res) { setIcpStatus("❌ The extension’s background worker restarted — press Save again"); return; }
+  if (!res.ok) { setIcpStatus("❌ " + (res.error || "The fields could not be saved")); return; }
+
+  // The response is the published ICP, so the panel shows exactly what was stored
+  // rather than the draft it sent.
+  icpChoices.config = res.data || icpChoices.config;
+  icpChoices.configError = "";
+  icpDraftReset();
+  const list = icpChoices.icps.find((i) => i.id === (icpChoices.config || {}).id);
+  if (list && icpChoices.config) list.version = icpChoices.config.version;
+  redrawIcpRules(null, true);
+  redrawIcpPick(document.getElementById("li-icp-body"));   // the option label carries the version
+  icpMarkDirty(false);
+  setIcpStatus("✅ Saved as version " + ((icpChoices.config || {}).version || "?") +
+               ". Press " + icpCta() + " to score this profile with it.");
+}
+
+// Read the selected ICP's rules and draw them, whatever happens.
+//
+// Every caller used to do this as a bare `loadIcpRules(...).then(draw)`. Nothing caught
+// a failure, so a thrown error became an unhandled rejection in the console and the
+// panel sat on "Loading this ICP's rules…" for good — no message, no retry, no clue.
+// A failure now reaches icpRulesHTML as configError and is drawn like any other.
+function refreshIcpRules(root, editable, force) {
+  return loadIcpRules(force)
+    .catch((err) => {
+      icpChoices.config = null;
+      icpChoices.configError = (err && err.message) || "the rules could not be read";
+    })
+    .then(() => { if (!root || root.isConnected) redrawIcpRules(root, editable); })
+    .catch((err) => console.error("[LI-AI] ICP rules could not be drawn", err));
+}
+
+function redrawIcpRules(root, editable) {
+  const holder = (root || document).querySelector("#li-icp-rules");
+  if (!holder) return;
+  holder.innerHTML = icpRulesHTML(editable);
+  if (editable) { wireRuleEditors(holder); icpMarkDirty(icpDraft && icpDraft.dirty); }
+}
+
+// The options list carries no configuration, so the rules are a separate read.
+async function loadIcpRules(force) {
+  if (icpChoices.config && !force) return icpChoices.config;
+  const res = await adminMessage({ action: "icp-selected" });
+  icpChoices.config = res && res.ok ? (res.data || null) : null;
+  icpChoices.configError = res ? (res.ok ? "" : (res.error || "admin backend error"))
+                               : "the extension’s background worker restarted";
+  return icpChoices.config;
+}
+
+// The remembered choice, so it survives moving between profiles.
+function writeIcpChoice(icpId) {
+  try {
+    chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
+      const settings = Object.assign({}, (r && r[LI_SETTINGS_KEY]) || {}, { icpId: icpId || "" });
+      chrome.storage.local.set({ [LI_SETTINGS_KEY]: settings });
+    });
+  } catch (e) { /* extension reloaded: the next panel open reads the backend anyway */ }
+}
+
+function wireIcpSelect(root) {
+  const sel = root && root.querySelector("#li-icp-select");
+  if (!sel) return;
+  sel.onchange = async () => {
+    try { await icpSelectionChanged(sel); }
+    catch (err) {
+      console.error("[LI-AI] ICP selection failed", err);
+      setIcpStatus("❌ " + ((err && err.message) || "that ICP could not be selected"));
+    }
+  };
+}
+
+async function icpSelectionChanged(sel) {
+    const previous = icpChoices.savedId || (icpChoices.selected && icpChoices.selected.id) || "";
+    const chosen = sel.value;
+    const picked = icpChoices.icps.find((i) => i.id === chosen);
+
+    // Put the choice back the way it was, in whichever select is on screen now:
+    // the panel may have been redrawn while the request was in flight.
+    const revert = (why) => {
+      icpChoices.savedId = previous;
+      const live = document.getElementById("li-icp-select") || sel;
+      if (previous) live.value = previous;
+      else if (live.selectedIndex >= 0) live.selectedIndex = -1;   // nothing was chosen before
+      writeIcpChoice(previous);
+      setIcpStatus("❌ " + why);
+    };
+
+    icpChoices.savedId = chosen;
+    writeIcpChoice(chosen);
+    // Saved the moment it is picked, so the admin shows the same ICP without waiting
+    // for an analysis. Calculate then only has to analyze.
+    sel.disabled = true;
+    let res;
+    try {
+      res = await adminMessage({ action: "select-icp", icpId: chosen });
+    } catch (err) {
+      revert(err && err.message ? err.message : "That ICP could not be selected");
+      return;
+    } finally {
+      // Always give the control back, even if the panel was replaced meanwhile.
+      sel.disabled = false;
+      const live = document.getElementById("li-icp-select");
+      if (live) live.disabled = false;
+    }
+
+    // No response at all means the service worker was torn down mid-request, so
+    // the backend never heard about this. Treating that as success is what let the
+    // panel claim one ICP while the admin went on scoring with another.
+    if (!res) { revert("The extension's background worker restarted — pick it again"); return; }
+    if (!res.ok) { revert(res.error || "That ICP could not be selected"); return; }
+
+    icpChoices.selected = picked || icpChoices.selected;
+    // The PUT answers with the whole ICP, so the rules update without another read.
+    if (res.data && res.data.id) {
+      icpChoices.config = res.data;
+      icpChoices.configError = "";
+    } else {
+      icpChoices.config = null;
+    }
+    // A different ICP has different rules, so the edit in progress belonged to the
+    // old one. Start again from what was just selected.
+    icpDraftReset();
+    setIcpStatus((picked ? "Scoring with " + picked.name : "ICP changed") +
+                 " — press " + icpCta() + " to score this profile with it.");
+    // Draw once, in the mode the panel is actually in. Drawing before the editable flag
+    // was known flashed the read-only rules first.
+    const editable = !!document.getElementById("li-icp-save");
+    if (icpChoices.config) redrawIcpRules(null, editable);
+    else refreshIcpRules(null, editable, true);
+}
+
+function restoreIcpChoice() {
+  return new Promise((resolve) =>
+    chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
+      icpChoices.savedId = ((r && r[LI_SETTINGS_KEY]) || {}).icpId || "";
+      resolve(icpChoices.savedId);
+    }));
+}
+
+const ICP_ACTIONS = ["li-icp-refresh", "li-icp-save", "li-icp-calc", "li-icp-recalc"];
 
 async function openIcpForm(reset) {
-  reset = reset === true;   // a click event must never count as "reset"
-  createPanel({
-    id: "li-icp-panel", btnId: "li-icp-btn", title: "🎯 ICP Score",
-    headerColor: "#059669", bodyId: "li-icp-body", closeId: "li-icp-close",
-  });
+  createPanel(PANELS.icp);
 
   const body = freshPanelBody("li-icp-body");
   if (!body) return;
+  // Just the choice and the button. The keyword lists that used to live here were
+  // the analyzer's; scoring moved to the admin's rule engine, so editing them could
+  // not change a score. ICP rules are edited in the admin, which is what scores.
   body.innerHTML = `
-    <div class="li-form-note">Keywords match whole words. Plurals and space/hyphen variants count too, so "health care" also finds "healthcare".</div>
-    <form id="li-icp-form" class="li-form-grid">
-      ${ICP_FIELDS.map(icpFieldHTML).join("")}
-    </form>
-    ${ptsTotalHTML("li-icp-pts-total")}
-    <div class="li-form-status" id="li-icp-status" role="status">${reset ? "Loading saved points…" : "Loading saved keywords…"}</div>
+    ${icpPickHTML()}
+    <div class="li-form-status" id="li-icp-status" role="status"></div>
     <div class="li-form-actions">
       <button type="button" class="li-btn li-btn-ghost" id="li-icp-refresh">🔄 Refresh</button>
-      <button type="button" class="li-btn li-btn-ghost" id="li-icp-save">💾 Save</button>
+      <button type="button" class="li-btn li-btn-ghost" id="li-icp-save" disabled>💾 Save rules</button>
       <button type="button" class="li-btn li-btn-green" id="li-icp-calc">🎯 Calculate ICP Score</button>
     </div>
+    <div id="li-icp-rules"></div>
   `;
 
-  const icpForm = document.getElementById("li-icp-form");
-  icpForm.addEventListener("submit", e => e.preventDefault());
-  wireIcpChipEditors(icpForm);
-  ICP_FIELDS.forEach((f) => renderIcpChips(f.key));
-  const refreshIcpPts = wirePoints(body, ICP_FIELDS, document.getElementById("li-icp-pts-total"), ICP_TOTAL,
-    () => setIcpStatus("Unsaved changes — press Save or Calculate ICP Score."));
+  wireIcpSelect(body);
   document.getElementById("li-icp-refresh").onclick = () => openIcpForm(true);
-  document.getElementById("li-icp-save").onclick = () => saveIcpClick();
+  document.getElementById("li-icp-save").onclick = () => saveIcpRules();
   document.getElementById("li-icp-calc").onclick = () => calculateIcpScore();
 
-  // Save / Calculate post every keyword list, so they stay off until the saved
-  // lists have loaded — otherwise one click would overwrite them with blanks.
-  setBusy(["li-icp-save", "li-icp-calc"], true);
-  try {
-    const config = await apiFetch("/icp-config");
-    if (!body.isConnected) return;   // replaced by a newer form
-    if (!reset) {
-      for (const f of ICP_FIELDS) {
-        const el = document.getElementById(`li-icp-${f.key}`);
-        if (el) el.value = (config[f.key] || []).join("\n");
-        // Restore which keywords were switched off before drawing the chips
-        const off = kwOffSet("li-icp", f.key);
-        off.clear();
-        for (const kw of ((config.DISABLED || {})[f.key] || [])) off.add(String(kw).toLowerCase());
-        renderIcpChips(f.key);
-      }
-    }
-    setPoints(body, config.POINTS);
-    refreshIcpPts();
-    setIcpStatus(reset
-      ? "Keywords cleared — Save or Calculate will store them blank. Close and reopen the panel to reload your saved ones."
-      : `Loaded ${countKeywords(config)} saved keywords.`);
-    setBusy(["li-icp-save", "li-icp-calc"], false);
-  } catch (err) {
-    if (!body.isConnected) return;
-    statusWithRetry("li-icp-status", `⚠️ Could not load your saved keywords (${err.message}). Save and Calculate stay off so they aren't overwritten.`,
-      () => openIcpForm(reset));
-  }
-}
-
-async function saveIcpClick() {
+  // Nothing can be scored until we know which ICPs exist, so hold the button.
   setBusy(ICP_ACTIONS, true);
-  setIcpStatus("Saving…");
-  try {
-    const saved = await saveIcpKeywords();
-    setIcpStatus(`✅ Saved ${countKeywords(saved)} keywords and your points.`);
-  } catch (err) {
-    setIcpStatus(`❌ Not saved: ${err.message}`);
-  } finally {
-    setBusy(ICP_ACTIONS, false);
-  }
-}
+  setIcpStatus("Loading ICP profiles…");
+  await restoreIcpChoice();
+  await loadIcpChoices(reset === true);
+  if (!body.isConnected) return;            // replaced by a newer panel
 
-function collectIcpKeywords() {
-  const config = {};
-  for (const f of ICP_FIELDS) {
-    const el = document.getElementById(`li-icp-${f.key}`);
-    config[f.key] = (el ? el.value : "").split("\n").map(s => s.trim()).filter(Boolean);
+  redrawIcpPick(body);
+  // The rules are a second small read; the dropdown is usable before they land.
+  // They are editable here — the admin's ICP Builder edits the same version.
+  icpDraftReset();
+  refreshIcpRules(body, true, reset === true);
+
+  setBusy(ICP_ACTIONS, false);
+  if (icpChoices.error) {
+    statusWithRetry("li-icp-status", "⚠️ " + icpChoices.error, () => openIcpForm(true));
+    setBusy(["li-icp-calc"], true);
+  } else if (!icpChoices.icps.length) {
+    setBusy(["li-icp-calc"], true);         // nothing to score against
+  } else {
+    const picked = icpChoices.icps.find((i) => i.id === chosenIcpId());
+    setIcpStatus(picked ? "Scoring with " + picked.name + " — press " + icpCta() + "." : "");
   }
-  const form = document.getElementById("li-icp-form");
-  if (form) config.POINTS = readPoints(form);
-  // Switched-off keywords travel with the lists so the backend keeps them but
-  // leaves them out of scoring.
-  config.DISABLED = {};
-  for (const f of ICP_FIELDS) {
-    const off = kwOffSet("li-icp", f.key);
-    config.DISABLED[f.key] = (config[f.key] || []).filter((kw) => off.has(String(kw).toLowerCase()));
-  }
-  return config;
 }
 
 function countKeywords(config) {
   return Object.values(config || {}).reduce((n, list) => n + (Array.isArray(list) ? list.length : 0), 0);
 }
 
-async function saveIcpKeywords() {
-  return apiFetch("/icp-config", collectIcpKeywords());
-}
+// Bumped by every run. A run that is no longer the latest must not save or render:
+// switching ICP twice in a row would otherwise let the slower first answer land last
+// and leave the panel showing a score the selected ICP did not produce.
+let icpRunSeq = 0;
 
 async function calculateIcpScore() {
-  const btn = document.getElementById("li-icp-calc");
+  // The form calls this button Calculate, the result panel calls it Re-analyze.
+  // Looking only for the form's id meant Re-analyze silently did nothing.
+  const btn = document.getElementById("li-icp-calc") || document.getElementById("li-icp-recalc");
   if (!btn) return;
+  const seq      = ++icpRunSeq;
+  const label    = btn.textContent;
   const scoreKey = scoreStoreKey();     // this person, even if the user navigates away
   const slug     = currentProfileSlug();
   const p        = scrapeProfile();     // before any wait: the page may change while we save
   setBusy(ICP_ACTIONS, true);
   btn.textContent = "⏳ Analyzing…";
+  setIcpStatus("");
+  const loading = showScoringLoader("li-icp-body", {
+    title: "Calculating the ICP score", stage: "Loading the selected ICP…",
+    rows: Object.values(ICP_GROUP_LABELS), accent: "var(--li-green)",
+  });
+  let shown = false;
 
   try {
     if (currentProfileSlug() !== slug) return;   // moved to someone else: don't score them as this person
-    setIcpStatus("Collecting this profile and scoring it against the selected ICP — this can take up to a minute…");
+    // The dropdown already saved the choice, so this only has to analyze.
+    if (!icpChoices.loaded) { await restoreIcpChoice(); await loadIcpChoices(); }
+    const icpId = chosenIcpId();
+    if (!icpId && icpChoices.icps.length) throw new Error("Choose an ICP profile first");
+    const icpName = (icpChoices.icps.find((i) => i.id === icpId) || {}).name;
+    loading.stage("Collecting this profile and scoring it against " + (icpName || "the selected ICP") + "…");
 
     // One call. The admin backend collects, scores against the ICP selected there,
     // stores the analysis and hands it back. Nothing is scored in this panel, which
     // is why the number here always equals the number in the admin.
     const res = await new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "li-admin", action: "analyze",
-        profileUrl: p.profileUrl, scraped: p, collect: true }, resolve));
+        profileUrl: p.profileUrl, scraped: p, collect: true, icpId: icpId || null }, resolve));
     if (!res) throw new Error("Extension was reloaded — refresh this LinkedIn tab");
     if (!res.ok) throw new Error(res.error || "The admin backend could not be reached");
     const out = res.data || {};
     if (out.success === false) throw new Error(out.message || "This profile could not be analyzed");
+    if (seq !== icpRunSeq) return;    // a newer ICP was picked while this ran
 
+    out.profileName = p.name || "";      // the admin answers with a score, not a person
     await saveStoredScore("icp", out, scoreKey);
     updateLead(p.profileUrl, p.name, Object.assign(leadProfileFields(p, null), {
       headline: p.headline || "",
@@ -1665,32 +2308,67 @@ async function calculateIcpScore() {
       adminLeadId: out.leadId || "",
     }));
     if (currentProfileSlug() !== slug || !document.getElementById("li-icp-body")) return;   // saved; nothing to show here
+    if (seq !== icpRunSeq) return;
     renderIcpResult(out, 0, null, { fresh: true });
+    shown = true;
   } catch (err) {
+    if (seq !== icpRunSeq) return;    // superseded: its own error is not news
+    loading.restore();
     setIcpStatus("❌ " + err.message);
-    const b = document.getElementById("li-icp-calc");
-    if (b) b.textContent = "🎯 Calculate ICP Score";
+    const b = document.getElementById("li-icp-calc") || document.getElementById("li-icp-recalc");
+    if (b) b.textContent = label;
     setBusy(ICP_ACTIONS, false);
+  } finally {
+    if (!shown) loading.restore();     // nothing drawn over it: give the panel back
   }
 }
 
 // Breakdown bars shared by both result panels. `rawDetail` is trusted HTML.
+// A score drawn as a ring: the arc is the share of 100 earned, the number sits inside
+// it. Starts at noon and fills clockwise, and the arc carries the band colour so the
+// shape and the figure can never disagree. The label always travels beside it, so the
+// colour is never the only thing reporting the verdict.
+function scoreRingHTML(score, color, opts) {
+  const size   = (opts && opts.size)   || 104;
+  const stroke = (opts && opts.stroke) || 9;
+  const label  = (opts && opts.label)  || "";
+  const r    = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  const pct  = Math.max(0, Math.min(100, Number(score) || 0));
+  const mid  = size / 2;
+  return `
+    <div role="img" aria-label="${escAttr(`${label || "Score"} ${score} out of 100`)}"
+         style="position:relative;flex-shrink:0;width:${size}px;height:${size}px;">
+      <svg width="${size}" height="${size}" style="display:block;transform:rotate(-90deg);" aria-hidden="true">
+        <circle cx="${mid}" cy="${mid}" r="${r}" fill="none" stroke="var(--li-track)" stroke-width="${stroke}"></circle>
+        <circle cx="${mid}" cy="${mid}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
+                stroke-linecap="round" stroke-dasharray="${circ.toFixed(2)}"
+                stroke-dashoffset="${(circ - (pct / 100) * circ).toFixed(2)}"
+                style="transition:stroke-dashoffset .6s cubic-bezier(.2,.8,.2,1),stroke .3s;"></circle>
+      </svg>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;">
+        <span class="li-score-num" style="font-size:30px;font-weight:800;color:${color};line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.02em;">${score}</span>
+        <span style="font-size:10px;color:var(--li-muted);margin-top:4px;">out of 100</span>
+      </div>
+    </div>`;
+}
+
 function scoreRowsHTML(rows, fullColor) {
-  return rows.map((row) => {
+  return rows.map((row, i) => {
     const pct   = row.max ? Math.max(0, Math.min(100, Math.round((row.score / row.max) * 100))) : 0;
     const color = row.max && row.score >= row.max ? fullColor : row.score > 0 ? "var(--li-blue)" : "var(--li-track)";
     const textColor = row.score > 0 ? color : "var(--li-muted)";   // track grey is invisible as text
     const detail = row.rawDetail || (row.detail ? escHtml(row.detail) : "");
     return `
-      <div style="margin-bottom:12px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-          <span style="font-size:13px;font-weight:500;color:var(--li-fg-2);">${escHtml(row.label)}</span>
+      <div style="margin-bottom:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:6px;">
+          <span style="font-size:13px;font-weight:600;color:var(--li-fg-2);">${escHtml(row.label)}</span>
           <span style="font-size:13px;font-weight:700;color:${textColor};font-variant-numeric:tabular-nums;">${row.score}/${row.max}</span>
         </div>
         <div style="height:6px;background:var(--li-track);border-radius:999px;overflow:hidden;">
-          <div style="height:100%;width:${pct}%;background:${color};border-radius:999px;"></div>
+          <div class="li-bar-fill" style="--i:${i};height:100%;width:${pct}%;background:${color};border-radius:999px;"></div>
         </div>
-        ${detail ? `<div style="font-size:11px;color:var(--li-muted);margin-top:3px;line-height:1.45;">${detail}</div>` : ""}
+        ${detail ? `<div style="font-size:11px;color:var(--li-muted);margin-top:6px;line-height:1.5;">${detail}</div>` : ""}
       </div>`;
   }).join("");
 }
@@ -1700,15 +2378,55 @@ function scoreRowsHTML(rows, fullColor) {
 // and the evidence all come from the admin backend, which is what stops this
 // panel and the admin panel disagreeing about the same person.
 
-function icpMatchedIn(result, category) {
-  return (result.matched || []).filter((m) => m.category === category);
+// ── ICP result -> what the AI endpoints accept ───────────────────────────────
+// A stored analysis from the admin backend carries a ScoreResult whose breakdown
+// is a list; the AI endpoints want {label: {score, max, reason}}. Converting here
+// keeps the reasons the panel already shows, so the AI sees why a score is what it
+// is rather than a bare number.
+// The AI endpoints take plain text, and icpRowDetail is markup for the panel.
+const stripTags = (html) => String(html || "").replace(/<br\s*\/?>/gi, " \u00b7 ").replace(/<[^>]*>/g, "");
+
+function icpForAi(data) {
+  if (!data) return { score: null, breakdown: {} };
+  const result = data.result || data;
+  if (!Array.isArray(result.breakdown)) {
+    // A score stored before the backends were unified.
+    return { score: Math.round(result.icp_score || 0), breakdown: result.breakdown || {} };
+  }
+  const breakdown = {};
+  for (const row of result.breakdown) {
+    breakdown[row.label || row.category] = {
+      score: row.earned || 0,
+      max: row.possible || 0,
+      reason: stripTags(icpRowDetail(result, row.key || row.category)) || "no match",
+    };
+  }
+  const score = data.score != null ? data.score : (result.score || 0);
+  return { score: Math.round(score), breakdown };
 }
 
-function icpRowDetail(result, category) {
-  const hits = icpMatchedIn(result, category);
-  if (hits.length) return hits.map((m) => `${escHtml(m.value)} +${m.weight}`).join(" · ");
-  const tried = (result.unmatched || []).filter((u) => u.category === category);
-  return tried.length ? `no match (tried ${tried.length})` : "";
+// Which tier produced a group's points, and which of its keywords matched. Only the
+// winning tier is shown: the lower tiers stop mattering once a higher one matches, so
+// listing them reads as a row of failures beside the win. The points are the tier's and
+// are counted once, so the row reads "Title — tier 2 · VP · +20", never "+20 +20".
+//
+// When nothing matched, that is one fact, not one per tier. Naming every tier that
+// failed ("Title — tier 1 (max 13): no keyword matched", then tier 2, then tier 3) said
+// the same thing three times and buried the groups that did score; the row already
+// carries 0 / max beside it.
+function icpRowDetail(result, groupKey) {
+  const group = (result.breakdown || []).find((b) => (b.key || b.category) === groupKey);
+  const fields = (group && group.fields) || [];
+  const live = fields.filter((f) => (f.keywords || []).length);
+  if (!live.length) return "";
+  const winnerKey = group && group.matchedField && group.matchedField.key;
+  if (!winnerKey) return "No keyword matched";
+  return live.filter((f) => f.key === winnerKey).map((f) => {
+    const hit = (f.matched || []).length
+      ? `matched ${f.matched.map(escHtml).join(", ")} — <strong>+${f.earned}</strong>`
+      : "no keyword matched";
+    return `${escHtml(f.label)} (max ${f.points}): ${hit}`;
+  }).join("<br>");
 }
 
 function renderAnalysis(out, storedAt, opts) {
@@ -1719,22 +2437,21 @@ function renderAnalysis(out, storedAt, opts) {
   const result = out.result || {};
   const score = out.score || 0;
   const color = score >= 70 ? "var(--li-green)" : score >= 40 ? "var(--li-warn)" : "var(--li-bad)";
-  const rows = (result.breakdown || []).map((b) => ({
-    label: b.label || b.category,
-    score: b.earned || 0,
-    max: b.possible || 0,
-    detail: icpRowDetail(result, b.category),
-  }));
-
-  const matched = result.matched || [];
-  const matchedHTML = matched.length
-    ? matched.map((m) => `<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--li-border);">
-        <span style="min-width:92px;font-size:11px;color:var(--li-muted);text-transform:uppercase;letter-spacing:.03em;">${escHtml(m.category)}</span>
-        <span style="font-weight:600;color:var(--li-fg);">${escHtml(m.value)}</span>
-        <span style="color:var(--li-green);font-weight:600;">+${m.weight}</span>
-        <span style="flex:1;font-size:11.5px;color:var(--li-muted);">${escHtml(m.evidence || "")}</span>
-      </div>`).join("")
-    : `<div class="li-form-note">Nothing on this profile matched the rules in this ICP.</div>`;
+  // The same green / amber / red signal the Activity panel puts beside its label, on the
+  // same 70 / 40 thresholds this panel already colours the number with. The band word
+  // still travels with it, so the colour is never the only thing carrying the verdict.
+  const signal = score >= 70 ? "\u{1F7E2}" : score >= 40 ? "\u{1F7E1}" : "\u{1F534}";
+  const rows = (result.breakdown || [])
+    .filter((b) => (b.possible || 0) > 0 || (b.fields || []).some((f) => (f.keywords || []).length))
+    .map((b) => ({
+      label: b.label || b.key,
+      score: b.earned || 0,
+      max: b.possible || 0,
+      // Trusted HTML: icpRowDetail escapes every value it interpolates, and it emits the
+      // <strong> and <br> that make a row readable. Passed as `detail` those tags were
+      // escaped and printed as text.
+      rawDetail: icpRowDetail(result, b.key || b.category),
+    }));
 
   // Fields nobody could collect are listed as unknown, never scored as a zero.
   const unavailable = out.unavailable || [];
@@ -1744,128 +2461,267 @@ function renderAnalysis(out, storedAt, opts) {
       }. ${escHtml(unavailable[0].reason || "")}</div>`
     : "";
 
-  const excluded = result.excludedBy
-    ? `<div class="li-form-note" style="border-color:var(--li-warn-border);background:var(--li-warn-bg);color:var(--li-warn-fg);">
-         Excluded by <strong>${escHtml(result.excludedBy.rule)}</strong> — ${escHtml(result.excludedBy.evidence || "")}</div>`
-    : "";
-  const capped = (result.failedRequired || []).length
-    ? `<div class="li-form-note">Required rule not met (${escHtml(result.failedRequired.join(", "))}) — capped from ${result.uncappedScore} to ${result.score}.</div>`
-    : "";
   const notes = (out.collectionNotes || []).length
     ? `<div class="li-form-note">${escHtml(out.collectionNotes.join(" · "))}</div>` : "";
 
   const icp = out.icp || {};
   const when = out.analyzedAt ? new Date(out.analyzedAt) : null;
 
+  // Who this is, read from the page: the admin's response carries the score, not the
+  // person. The Activity panel heads its result the same way, and both panels now run
+  // header → score → basis → evidence in the same order at the same sizes.
+  const p    = safeScrape();
+  // scrapeProfile answers the literal "Unknown" when LinkedIn's <h1> is not readable
+  // yet — which is common here, because this panel often opens on a stored score before
+  // the page has finished rendering. The slug in the URL is always there, so fall back
+  // to it the way the admin derives its own display name, and show nothing rather than
+  // the word "Unknown" if even that fails.
+  const name = profileDisplayName(out.profileName, p.name);
+  const meta = [p.current_company, p.country].filter((v) => v && v !== "Not specified").join(" • ");
+  const scored = `${when ? `Scored ${escHtml(when.toLocaleString())}` : ""}${
+    out.adminLeadUrl ? `${when ? " · " : ""}<a href="${escAttr(out.adminLeadUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--li-blue);">open in admin</a>` : ""}`;
+
   body.innerHTML = `
-    ${storedAt ? `<div class="li-form-note">💾 Stored score from <strong>${escHtml(fmtSavedAt(storedAt))}</strong> — press <strong>Re-analyze</strong> for a fresh one.</div>` : ""}
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
-      <div style="display:flex;align-items:center;gap:12px;">
-        <div style="font-size:36px;font-weight:800;color:${color};font-variant-numeric:tabular-nums;letter-spacing:-.02em;">${score}</div>
-        <div>
-          <div style="font-size:11px;color:var(--li-muted);">out of 100 · ${result.earned || 0} of ${result.possible || 0} points</div>
-          <div style="font-size:16px;color:var(--li-fg);font-weight:700;margin-top:2px;">${escHtml(result.bandLabel || out.classification || "")}</div>
-        </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <div>
+        ${name ? `<div data-li-name style="font-size:17px;font-weight:700;color:var(--li-fg);">${escHtml(name)}</div>` : ""}
+        ${meta ? `<div style="font-size:12px;color:var(--li-muted);">${escHtml(meta)}</div>` : ""}
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
-        <button type="button" class="li-btn li-btn-ghost" id="li-icp-edit">✏️ Edit ICP</button>
+        <button type="button" class="li-btn li-btn-ghost" id="li-icp-edit">✏️ Edit Details</button>
         <button type="button" class="li-btn li-btn-green" id="li-icp-recalc">🔄 Re-analyze</button>
       </div>
     </div>
-    <div style="font-size:11.5px;color:var(--li-muted);margin-bottom:12px;">
-      Scored by <strong>${escHtml(icp.name || "the selected ICP")}</strong>${icp.version ? ` · version ${icp.version}` : ""}
-      ${when ? ` · ${escHtml(when.toLocaleString())}` : ""}
-      ${out.adminLeadUrl ? ` · <a href="${escAttr(out.adminLeadUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--li-blue);">open in admin</a>` : ""}
-    </div>
-    ${excluded}${capped}${unavailableHTML}${notes}
-    <div style="border-top:1px solid var(--li-border);padding-top:14px;">
-      ${scoreRowsHTML(rows, "var(--li-green)")}
-    </div>
-    <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--li-muted);margin:16px 0 4px;">What matched</h3>
-    ${matchedHTML}
-    ${outreachBlockHTML("icp")}
-  `;
-  const edit = document.getElementById("li-icp-edit");
-  if (edit) edit.onclick = () => openIcpForm();
-  const recalc = document.getElementById("li-icp-recalc");
-  if (recalc) recalc.onclick = () => calculateIcpScore();
-  mountOutreach(body.querySelector(".li-outreach"), { fresh: !!(opts && opts.fresh) });
-}
-
-
-function renderIcpResult(result, keywordCount, storedAt, opts) {
-  // A result from the admin backend carries its own ScoreResult and the ICP that
-  // produced it; anything else is a score stored before the backends were unified.
-  if (result && result.result && result.icp) return renderAnalysis(result, storedAt, opts);
-  applyTheme();
-  const body = freshPanelBody("li-icp-body");
-  if (!body) return;
-  // Fixed order: chrome.storage hands stored objects back with their keys sorted
-  const ORDER = ["Industry Match", "Job Title Match", "Company Size Match", "Geography Match", "Profile Keywords"];
-  const rank = (k) => (ORDER.indexOf(k) + 1) || 99;
-  const rows = Object.entries(result.breakdown || {}).sort(([a], [b]) => rank(a) - rank(b)).map(([label, d]) => ({
-    label, score: (d && d.score) || 0, max: (d && d.max) || 0, detail: (d && d.reason) || "",
-  }));
-  const missing = Array.isArray(result.missing) ? result.missing
-    : rows.filter((r) => r.detail === "No data").map((r) => r.label);
-
-  const score = result.icp_score || 0;
-  const color = score >= 70 ? "var(--li-green)" : score >= 40 ? "var(--li-warn)" : "var(--li-bad)";
-
-  body.innerHTML = `
-    ${storedAt ? `<div class="li-form-note">💾 Stored score from <strong>${escHtml(fmtSavedAt(storedAt))}</strong> — press <strong>Edit Keywords</strong> to calculate a fresh one.</div>` : ""}
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
-      <div style="display:flex;align-items:center;gap:12px;">
-        <div style="font-size:36px;font-weight:800;color:${color};font-variant-numeric:tabular-nums;letter-spacing:-.02em;">${score}</div>
+    ${unavailableHTML}${notes}
+    ${storedAt ? `<div class="li-form-note">💾 Stored score from <strong>${escHtml(fmtSavedAt(storedAt))}</strong> — press <strong>Re-analyze</strong> for a fresh one.</div>` : ""}
+    <div>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;">
+        ${scoreRingHTML(score, color, { label: "ICP match score" })}
         <div>
-          <div style="font-size:11px;color:var(--li-muted);">out of 100</div>
-          <div style="font-size:16px;color:var(--li-fg);font-weight:700;margin-top:2px;">${score >= 70 ? "🟢 Strong ICP Fit" : score >= 40 ? "🟡 Partial Fit" : "🔴 Weak Fit"}</div>
+          <div style="font-size:16px;color:var(--li-fg);font-weight:700;">${signal} ${escHtml(result.bandLabel || out.classification || "")}</div>
+          <div style="font-size:12px;color:var(--li-muted);margin-top:5px;">Earned ${result.earned || 0} of ${result.possible || 0} points.</div>
         </div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <span class="li-chip">${keywordCount} keywords</span>
-        <button type="button" class="li-btn li-btn-green" id="li-icp-edit">✏️ Edit Keywords</button>
+      <div style="display:flex;flex-direction:column;gap:10px;font-size:11.5px;color:var(--li-muted);margin-bottom:16px;">
+        ${icpPickHTML()}
+        <div class="li-form-status li-status-inline" id="li-icp-status" role="status"></div>
+        ${scored ? `<div>${scored}</div>` : ""}
+      </div>
+      <div style="border-top:1px solid var(--li-border);padding-top:14px;">
+        ${scoreRowsHTML(rows, "var(--li-green)")}
       </div>
     </div>
-    ${missing.length ? `<div class="li-form-note">No data on this profile for <strong>${escHtml(missing.join(", "))}</strong>. Those count as 0, so the real fit may be higher.</div>` : ""}
-    <div style="border-top:1px solid var(--li-border);padding-top:14px;">
-      ${scoreRowsHTML(rows, "var(--li-green)")}
-    </div>
-    ${outreachBlockHTML("icp")}
   `;
-  document.getElementById("li-icp-edit").onclick = () => openIcpForm();
-  mountOutreach(body.querySelector(".li-outreach"), { fresh: !!(opts && opts.fresh) });
+  // A score stored before the name was stamped has none, and the live scrape can come
+  // back empty here, so the header falls back to the slug: "Shahilbhatt" where the
+  // Activity panel says "Shahil Bhatt". The lead record kept the real name from when the
+  // score was calculated - use it, rather than have the two panels name one person twice.
+  if (name && name === nameFromSlug(currentProfileSlug())) {
+    withLeads((leads) => {
+      const lead = leads[liFindLeadKey(leads, p.profileUrl, "")] || {};
+      const el = body.querySelector("[data-li-name]");
+      if (el && lead.name && lead.name !== name) el.textContent = lead.name;
+    });
+  }
+
+  const edit = document.getElementById("li-icp-edit");
+  if (edit) edit.onclick = () => openIcpForm();
+  wireIcpSelect(body);
+  // Opening straight to a stored score renders before the ICP list has been
+  // fetched, which would leave the dropdown saying "Loading ICP profiles…" for
+  // good. Fill it in when it lands.
+  if (!icpChoices.loaded) {
+    restoreIcpChoice()
+      .then(() => loadIcpChoices())
+      .catch((err) => { icpChoices.loaded = true; icpChoices.error = (err && err.message) || "admin backend unreachable"; })
+      .then(() => { if (body.isConnected) redrawIcpPick(body); })
+      .catch((err) => console.error("[LI-AI] ICP list could not be drawn", err));
+  }
+  // The rules themselves are not repeated here - the breakdown already names the tier
+  // that scored, and the full list belongs to Edit ICP.
+  const recalc = document.getElementById("li-icp-recalc");
+  if (recalc) recalc.onclick = () => calculateIcpScore();
+  if (opts && opts.fresh) revealFreshScore(body);
 }
 
-async function handleAnalyzeClick() {
-  const existing = document.getElementById("li-ai-panel");
+/** Whether a stored or fresh score came from the admin backend and can be rendered. */
+function isScoredResult(result) {
+  return !!(result && result.result && result.icp);
+}
+
+function renderIcpResult(result, keywordCount, storedAt, opts) {
+  // Only the admin backend's shape can be rendered: it carries its own ScoreResult and
+  // the ICP that produced it. A score stored before the backends were unified has none
+  // of that, and drawing it produced a panel of 0/0 rows reading "Weak Fit" - worse than
+  // showing nothing. Offer the rules instead, so one press recalculates it properly.
+  if (isScoredResult(result)) return renderAnalysis(result, storedAt, opts);
+  openIcpForm();
+}
+
+// Pressing the button closes an open panel, shows the score already stored for this
+// person, or — with nothing stored — opens the form. `canRender` differs because a
+// stored ICP score from before the backends were unified cannot be drawn.
+async function toggleScorePanel(kind, { canRender, render, openForm }) {
+  const existing = document.getElementById(PANELS[kind].id);
   if (existing) { existing.remove(); return; }
-  const stored = (await loadStoredScores()).activity;
-  if (stored && stored.data) {
-    // Show the stored score right away — no new request, no recalculation
-    createPanel({
-      id: "li-ai-panel", btnId: "li-ai-analyze-btn", title: "⚡ Activity Score",
-      bodyId: "li-ai-body", closeId: "li-ai-close",
-    });
-    renderPanel(stored.data, stored.savedAt);
+  const stored = (await loadStoredScores())[kind];
+  if (stored && canRender(stored.data)) {
+    createPanel(PANELS[kind]);        // the stored score right away: no request, no recalculation
+    render(stored.data, stored.savedAt);
   } else {
-    openActivityForm();
+    openForm();
   }
+}
+
+// ─── Signed out ───────────────────────────────────────────────────────────────
+// The extension is locked until someone signs in through the toolbar popup. The
+// buttons and the ✨ stay on the page — hiding them would just look broken — and
+// say so when they are pressed. The session lives in chrome.storage (leads.js),
+// so signing out in the popup reaches this tab through onChanged below.
+let _liAuth = null;
+// Reloading the extension orphans the content script already running in an open
+// LinkedIn tab: chrome.* then throws "Extension context invalidated", or simply
+// never calls back. That is NOT "signed out" — nothing this script does will work
+// again and no amount of signing in helps, so it has to be told apart and say
+// what actually fixes it. apiFetch() has said the same thing for a while.
+let _liOrphaned = false;
+
+const extensionAlive = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; } };
+
+function refreshAuth() {
+  return new Promise((resolve) => {
+    let settled = false, guard = 0;
+    const done = (auth, orphaned) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(guard);
+      _liOrphaned = orphaned;
+      resolve((_liAuth = auth));
+    };
+    if (!extensionAlive()) return done(null, true);
+    // A dead context can also answer with silence; never leave a click hanging.
+    guard = setTimeout(() => done(null, true), 4000);
+    try { liGetAuth((auth) => done(auth, !extensionAlive())); }
+    catch (e) { done(null, true); }
+  });
+}
+
+const signedIn = () => liAuthValid(_liAuth);
+
+const LOCK_SVG = '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<rect x="4" y="8.5" width="12" height="8" rx="2"/><path d="M7 8.5V6a3 3 0 0 1 6 0v2.5"/></svg>';
+
+const REFRESH_SVG = '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M16.5 10a6.5 6.5 0 1 1-1.9-4.6"/><path d="M16.5 3.5V6H14"/></svg>';
+
+// One block, two homes: the score panels and the ✨ popup. `what` finishes the
+// sentence "Sign in to …", so each place names the thing that was just asked for.
+// An orphaned tab gets the other message entirely: signing in cannot fix it.
+function signedOutHTML(what) {
+  if (_liOrphaned) {
+    return '<div class="li-signout">' +
+      '<div class="li-signout-lock">' + REFRESH_SVG + "</div>" +
+      '<div class="li-signout-title">Refresh this tab to keep going</div>' +
+      '<p class="li-signout-text">The extension was reloaded, so this page is still running the old copy ' +
+        "of it and can no longer reach your scores. Refreshing brings everything back — nothing was lost, " +
+        "and you do not need to sign in again.</p>" +
+      '<button type="button" class="li-signout-btn" data-act="reload-page">Refresh the page</button>' +
+      '<div class="li-signout-hint" data-role="signin-hint"></div>' +
+    "</div>";
+  }
+  return '<div class="li-signout">' +
+    '<div class="li-signout-lock">' + LOCK_SVG + "</div>" +
+    '<div class="li-signout-title">Sign in to ' + escHtml(what) + "</div>" +
+    '<p class="li-signout-text">Scores, leads and AI notes are locked until you sign in to the ' +
+      "LinkedIn AI Analyzer extension. Nothing you have already saved was removed.</p>" +
+    '<button type="button" class="li-signout-btn" data-act="open-popup">Open the extension</button>' +
+    '<div class="li-signout-hint" data-role="signin-hint"></div>' +
+  "</div>";
+}
+
+// The toolbar popup can only be opened by the extension itself, and not on every
+// Chrome version — so the button asks the background worker and, when that is
+// refused, turns into the instruction it was standing in for.
+function wireSignInPrompt(root) {
+  const reload = root.querySelector('[data-act="reload-page"]');
+  if (reload) { reload.onclick = () => location.reload(); return; }
+  const btn = root.querySelector('[data-act="open-popup"]');
+  const hint = root.querySelector('[data-role="signin-hint"]');
+  if (!btn) return;
+  btn.onclick = () => {
+    btn.disabled = true;
+    try {
+      chrome.runtime.sendMessage({ type: "li-open-popup" }, (res) => {
+        const failed = chrome.runtime.lastError || !res || !res.ok;
+        btn.disabled = false;
+        if (!failed) return;
+        btn.remove();
+        if (hint) hint.textContent = "Click the extension icon in your Chrome toolbar to sign in, then press this button again.";
+      });
+    } catch (e) {
+      btn.disabled = false;
+      if (hint) hint.textContent = "Click the extension icon in your Chrome toolbar to sign in.";
+    }
+  };
+}
+
+// Same shell, same ✕, same place on the page as a real score panel.
+function showSignedOutPanel(kind, what) {
+  const existing = document.getElementById(PANELS[kind].id);
+  if (existing) { existing.remove(); return; }
+  injectStyles();
+  applyTheme();
+  createPanel(PANELS[kind]);
+  const body = freshPanelBody(PANELS[kind].bodyId);
+  if (!body) return;
+  body.innerHTML = signedOutHTML(what);
+  wireSignInPrompt(body);
+}
+
+// Crossing the gate in the popup reaches every open LinkedIn tab. Signing out
+// takes the panels and any ✨ popup down rather than leaving a score on screen
+// that can no longer be refreshed; signing in clears the locked ones, which are
+// now answering a question that has been settled.
+const isLockedUI = (el) => !!(el && el.querySelector(".li-signout"));
+
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes[LI_AUTH_KEY]) return;
+    _liAuth = changes[LI_AUTH_KEY].newValue || null;
+    const stale = signedIn() ? isLockedUI : () => true;
+    for (const p of Object.values(PANELS)) {
+      const panel = document.getElementById(p.id);
+      if (panel && stale(panel)) panel.remove();
+    }
+    openSpark.slice().forEach((rec) => {
+      try { if (stale(rec.box)) removeSparkRec(rec); } catch (e) { /* already gone */ }
+    });
+  });
+} catch (e) { /* no storage events: the check on every click still holds */ }
+
+refreshAuth();
+
+async function handleAnalyzeClick() {
+  await refreshAuth();
+  if (!signedIn()) return showSignedOutPanel("activity", "score this profile’s activity");
+  return toggleScorePanel("activity", {
+    canRender: (data) => !!data, render: renderPanel, openForm: openActivityForm,
+  });
 }
 
 async function handleIcpClick() {
-  const existing = document.getElementById("li-icp-panel");
-  if (existing) { existing.remove(); return; }
-  const stored = (await loadStoredScores()).icp;
-  if (stored && stored.data && stored.data.result) {
-    createPanel({
-      id: "li-icp-panel", btnId: "li-icp-btn", title: "🎯 ICP Score",
-      headerColor: "#059669", bodyId: "li-icp-body", closeId: "li-icp-close",
-    });
-    renderIcpResult(stored.data.result, stored.data.keywordCount || 0, stored.savedAt);
-  } else {
-    openIcpForm();
-  }
+  await refreshAuth();
+  if (!signedIn()) return showSignedOutPanel("icp", "score this profile against your ICP");
+  // What was stored is the whole analyze response, which is also what a fresh calculate
+  // renders. Passing `.result` handed over the bare ScoreResult with no `icp` on it, so
+  // the panel could not recognise its own stored score.
+  return toggleScorePanel("icp", {
+    canRender: isScoredResult,
+    render: (data, savedAt) => renderIcpResult(data, 0, savedAt),
+    openForm: openIcpForm,
+  });
 }
 
 // ─── Render Panel ──────────────────────────────────────────────────────────────
@@ -1892,49 +2748,27 @@ function liTimeAgoText(d) {
 // The Recent Activity line for an /analyze result. With the post's real date
 // (activity_date) the relative phrase is rebuilt NOW and the exact local date
 // and time is shown; older stored scores without it keep the server's text.
+//
+// The post's own words are left out. This factor scores WHEN they last posted, not what
+// they said, and a quoted opening line ran past the row, pushed the date out of view and
+// read as if it were evidence for the points. The line still links to the post.
 function liActivityText(data) {
-  const raw = (data && data.activity) || "No activity data";
+  const raw = ((data && data.activity) || "No activity data").replace(/\s—\s".*$/, "");
   const d = data && data.activity_date ? new Date(data.activity_date) : null;
   if (!d || isNaN(d.getTime())) return raw;
   const abs = d.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
-  const snippet = (raw.match(/\s—\s(".*")\s*$/) || [])[0] || "";
   const verb = /^reposted/i.test(raw) ? "Reposted someone else's post" : "Last posted";
-  return `${verb} ${liTimeAgoText(d)} (${abs})${snippet}`;
+  return `${verb} ${liTimeAgoText(d)} (${abs})`;
 }
 
-function renderPanel(data, storedAt, opts) {
-  applyTheme();
-  const body = freshPanelBody("li-ai-body");
-  if (!body) return;
-  const name            = data.name            || "Unknown";
-  const country         = data.country         || "Not specified";
-  const current_company = data.current_company || "Not specified";
-  const activity        = liActivityText(data);
-  const activity_url    = /^https?:\/\//i.test(data.activity_url || "") ? data.activity_url : "";
-
-  const score_total = data.score_total || 0;
-  const score_label = data.score_label ||
-    (score_total >= 70 ? "🟢 Ready to Engage" : score_total >= 40 ? "🟡 Needs Nurturing" : "🔴 Difficult to Engage");
-
+// The six Activity factors of an /analyze result. The Activity panel draws these and the
+// same list is sent to the admin, so the breakdown there is this one, word for word.
+function activityFactors(data) {
   // Server-side maxima (editable points); older stored scores use the defaults
   const max = {
     activity: data.max_activity ?? 30, posts: data.max_posts ?? 20, engagement: data.max_engagement ?? 20,
     completeness: data.max_completeness ?? 10, signals: data.max_signals ?? 10, mutuals: data.max_mutuals ?? 10,
   };
-
-  let scoreColor = "var(--li-bad)";
-  if (score_total >= 70) scoreColor = "var(--li-ok)";
-  else if (score_total >= 40) scoreColor = "var(--li-warn)";
-
-  let activityHTML = escHtml(activity);
-  if (activity_url) {
-    activityHTML = `<a href="${escAttr(activity_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--li-blue);text-decoration:none;font-weight:600;">${escHtml(activity)} 🔗</a>`;
-  } else if (/\b(ago|today|yesterday)\b/i.test(activity)) {
-    activityHTML = `<strong style="color:var(--li-ok);">⏱️ ${escHtml(activity)}</strong>`;
-  } else if (/recent/i.test(activity)) {
-    activityHTML = `<strong style="color:var(--li-warn);">⏱️ ${escHtml(activity)}</strong>`;
-  }
-
   const engagement = data.engagement_label || "No data";
   const engDetail = /^no data/i.test(engagement) ? engagement
     : `${engagement} · avg ${data.avg_likes || 0} likes, ${data.avg_comments || 0} comments, ${data.avg_reposts || 0} reposts per post`;
@@ -1943,15 +2777,49 @@ function renderPanel(data, storedAt, opts) {
   const signalDetail = hits.length
     ? hits.map(([list, kw]) => `${SIGNAL_NAMES[list] || list}: "${kw}"`).join(" · ")
     : ("signal_hits" in data ? "No hiring or growth words found" : "");
-
-  const scoreRows = [
-    { label: "Recent Activity",       score: data.score_activity || 0,     max: max.activity,     rawDetail: activityHTML },
-    { label: "Posting Frequency",     score: data.score_posts || 0,        max: max.posts,        detail: `${data.posts_90_days || 0} posts in 90 days · ${data.posts_30_days || 0} in the last 30` },
-    { label: "Engagement Level",      score: data.score_engagement || 0,   max: max.engagement,   detail: engDetail },
-    { label: "Profile Completeness",  score: data.score_completeness || 0, max: max.completeness, detail: missing.length ? "Missing: " + missing.join(", ") : "" },
-    { label: "Hiring/Growth Signals", score: data.score_signals || 0,      max: max.signals,      detail: signalDetail },
-    { label: "Mutual Connections",    score: data.score_mutuals || 0,      max: max.mutuals,      detail: `${data.mutual_connections || 0} mutual` },
+  return [
+    { key: "activity",     label: "Recent Activity",       score: data.score_activity || 0,     max: max.activity,     detail: liActivityText(data) },
+    { key: "posts",        label: "Posting Frequency",     score: data.score_posts || 0,        max: max.posts,        detail: `${data.posts_90_days || 0} posts in 90 days · ${data.posts_30_days || 0} in the last 30` },
+    { key: "engagement",   label: "Engagement Level",      score: data.score_engagement || 0,   max: max.engagement,   detail: engDetail },
+    { key: "completeness", label: "Profile Completeness",  score: data.score_completeness || 0, max: max.completeness,
+      detail: missing.length ? "Missing: " + missing.join(", ") : ("completeness_missing" in data ? "Nothing missing" : "") },
+    { key: "signals",      label: "Hiring/Growth Signals", score: data.score_signals || 0,      max: max.signals,      detail: signalDetail },
+    { key: "mutuals",      label: "Mutual Connections",    score: data.score_mutuals || 0,      max: max.mutuals,
+      detail: `${data.mutual_connections || 0} mutual — read from LinkedIn` },
   ];
+}
+
+function renderPanel(data, storedAt, opts) {
+  applyTheme();
+  const body = freshPanelBody("li-ai-body");
+  if (!body) return;
+  const scraped         = safeScrape();
+  const name            = profileDisplayName(data.name, scraped.name);
+  const country         = data.country         || scraped.country         || "Not specified";
+  const current_company = data.current_company || scraped.current_company || "Not specified";
+  const activity        = liActivityText(data);
+  const activity_url    = /^https?:\/\//i.test(data.activity_url || "") ? data.activity_url : "";
+
+  const score_total = data.score_total || 0;
+  const score_label = data.score_label ||
+    (score_total >= 70 ? "🟢 Ready to Engage" : score_total >= 40 ? "🟡 Needs Nurturing" : "🔴 Difficult to Engage");
+
+  let scoreColor = "var(--li-bad)";
+  if (score_total >= 70) scoreColor = "var(--li-ok)";
+  else if (score_total >= 40) scoreColor = "var(--li-warn)";
+
+  let activityHTML = escHtml(activity);
+  if (activity_url) {
+    activityHTML = `<a href="${escAttr(activity_url)}" target="_blank" rel="noopener noreferrer" style="color:var(--li-blue);text-decoration:none;font-weight:600;">${escHtml(activity)}</a>`;
+  } else if (/\b(ago|today|yesterday)\b/i.test(activity)) {
+    activityHTML = `<strong style="color:var(--li-ok);">⏱️ ${escHtml(activity)}</strong>`;
+  } else if (/recent/i.test(activity)) {
+    activityHTML = `<strong style="color:var(--li-warn);">⏱️ ${escHtml(activity)}</strong>`;
+  }
+
+  // Recent Activity keeps its link to the post here; everywhere else it is plain text.
+  const scoreRows = activityFactors(data).map((f) =>
+    f.key === "activity" ? { label: f.label, score: f.score, max: f.max, rawDetail: activityHTML } : f);
   const n = data.posts_analyzed || 0;
   const basis = n ? `Based on ${n} recent post${n === 1 ? "" : "s"} plus the profile.`
     : data.data_source === "form" ? "No post data — scored from the page and the values you typed." : "";
@@ -1959,30 +2827,30 @@ function renderPanel(data, storedAt, opts) {
   body.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
       <div>
-        <div style="font-size:17px;font-weight:700;color:var(--li-fg);">${escHtml(name)}</div>
-        <div style="font-size:12px;color:var(--li-muted);">${escHtml([current_company, country].filter(v => v && v !== "Not specified").join(" • "))}</div>
+        ${name ? `<div data-li-name style="font-size:17px;font-weight:700;color:var(--li-fg);">${escHtml(name)}</div>` : ""}
+        ${[current_company, country].filter(v => v && v !== "Not specified").length
+          ? `<div style="font-size:12px;color:var(--li-muted);">${escHtml([current_company, country].filter(v => v && v !== "Not specified").join(" • "))}</div>` : ""}
       </div>
       <button type="button" class="li-btn li-btn-ghost" id="li-ai-edit">✏️ Edit Details</button>
     </div>
     ${data.scrape_warning ? `<div class="li-form-note" style="border-color:var(--li-warn-border);background:var(--li-warn-bg);color:var(--li-warn-fg);">⚠️ ${escHtml(data.scrape_warning)}</div>` : ""}
+    ${(data.failed_required || []).length ? `<div class="li-form-note">Required: ${escHtml(data.failed_required.join(", "))} — score capped from ${data.score_uncapped} to ${score_total}.</div>` : ""}
     ${storedAt ? `<div class="li-form-note">💾 Stored score from <strong>${escHtml(fmtSavedAt(storedAt))}</strong> — press <strong>Edit Details</strong> to calculate a fresh one.</div>` : ""}
     <div>
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:${basis ? 6 : 16}px;">
-        <div style="font-size:40px;font-weight:800;color:${scoreColor};line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.02em;">${score_total}</div>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;">
+        ${scoreRingHTML(score_total, scoreColor, { label: "Activity score" })}
         <div>
-          <div style="font-size:11px;color:var(--li-muted);">out of 100</div>
-          <div style="font-size:16px;color:var(--li-fg);font-weight:700;margin-top:2px;">${escHtml(score_label)}</div>
+          <div style="font-size:16px;color:var(--li-fg);font-weight:700;">${escHtml(score_label)}</div>
+          ${basis ? `<div style="font-size:12px;color:var(--li-muted);margin-top:5px;">${escHtml(basis)}</div>` : ""}
         </div>
       </div>
-      ${basis ? `<div style="font-size:12px;color:var(--li-muted);margin-bottom:14px;">${escHtml(basis)}</div>` : ""}
       <div style="border-top:1px solid var(--li-border);padding-top:14px;">
         ${scoreRowsHTML(scoreRows, "var(--li-ok)")}
       </div>
     </div>
-    ${outreachBlockHTML("activity")}
   `;
   document.getElementById("li-ai-edit").onclick = () => openActivityForm();
-  mountOutreach(body.querySelector(".li-outreach"), { fresh: !!(opts && opts.fresh) });
+  if (opts && opts.fresh) revealFreshScore(body);
 }
 
 // ─── Suggested outreach: a connection note + first message from the analysis ─
@@ -2047,7 +2915,7 @@ async function outreachContext(tone) {
   const leadsR = await storageGet([LI_LEADS_KEY]);
   const allLeads = leadsR[LI_LEADS_KEY] || {};
   const act = (stored.activity && stored.activity.data) || null;
-  const icp = (stored.icp && stored.icp.data && stored.icp.data.result) || null;
+  const icp = (stored.icp && stored.icp.data) || null;
   const NA = /^(not specified|unknown|no activity data|no recent activity|no projects)$/i;
   const val = (v) => (v && !NA.test(String(v).trim()) ? String(v).trim() : "");
   const name = val(act && act.name) || val(p.name);
@@ -2061,8 +2929,8 @@ async function outreachContext(tone) {
     about: (val(act && act.about) || val(p.about)).slice(0, 1500),
     activity: val(act ? liActivityText(act) : "") || val(p.activity),
     profile_url: profileKeyUrl(),
-    icp_score: icp ? Math.round(icp.icp_score || 0) : null,
-    icp_breakdown: icp ? icp.breakdown || {} : {},
+    icp_score: icp ? icpForAi(icp).score : null,
+    icp_breakdown: icp ? icpForAi(icp).breakdown : {},
     activity_score: act ? Math.round(act.score_total || 0) : null,
     activity_label: (act && act.score_label) || "",
     engagement_label: (act && act.engagement_label) || "",
@@ -2647,7 +3515,7 @@ async function inviteAnalysis(t) {
   const r = await storageGet([scoreKey, LI_LEADS_KEY]);
   const stored = r[scoreKey] || {};
   const act = (stored.activity && stored.activity.data) || null;
-  const icp = (stored.icp && stored.icp.data && stored.icp.data.result) || null;
+  const icp = (stored.icp && stored.icp.data) || null;
   const leads = r[LI_LEADS_KEY] || {};
   const lead = leads[liFindLeadKey(leads, t.url, t.fullName)] || {};
   const fill = (k, v) => { if (!out[k] && val(v)) out[k] = val(v); };
@@ -2660,7 +3528,7 @@ async function inviteAnalysis(t) {
     out.engagement_label = act.engagement_label || "";
     out.signal_hits = act.signal_hits || {};
   }
-  if (icp) { out.icp_score = Math.round(icp.icp_score || 0); out.icp_breakdown = icp.breakdown || {}; }
+  if (icp) { const forAi = icpForAi(icp); out.icp_score = forAi.score; out.icp_breakdown = forAi.breakdown; }
   fill("headline", lead.headline);
   fill("current_company", lead.company);
   if (val(lead.painPoint)) out.pain_point = val(lead.painPoint).slice(0, 200);
@@ -2974,9 +3842,30 @@ const ICON_CLOSE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" 
 
 // opts.context = "invite" → Connect → "Add a note" box (no chat history,
 // LinkedIn's own character limit, popup opens above the note box).
+// The ✨ popup's shell with the sign-in block in it. It joins `openSpark` like a
+// real one, so the page tick keeps it in place, a dead composer prunes it, and ✕
+// closes it — every rule that governs the AI popup governs this too.
+function openSignedOutSpark({ form, editable, spark, anchor, invite }) {
+  const box = document.createElement("div");
+  box.className = "li-ai-popup";
+  box.style.cssText = AI_BOX_CSS + "position:relative;";
+  box.innerHTML = '<button type="button" class="li-signout-close" data-act="close" aria-label="Close">×</button>' +
+    signedOutHTML(invite ? "write this connection note" : "write with AI here");
+  const record = { form, editable, box, spark, anchor, context: invite ? "invite" : "chat" };
+  record.place = () => placeSparkBox((record.anchor && record.anchor.isConnected) ? record.anchor : record.form, box, { above: invite });
+  record.removeBox = () => removeSparkRec(record);
+  box.querySelector('[data-act="close"]').onclick = record.removeBox;
+  wireSignInPrompt(box);
+  openSpark.push(record);
+  document.body.appendChild(box);
+  record.place();
+  try { spark.style.background = "rgba(124,58,237,.15)"; } catch (e) {}
+}
+
 async function toggleAiPopup(editable, spark, opts) {
   opts = opts || {};
   const prefs = await loadAiPrefs();
+  await refreshAuth();
   // Theme variables live in the shared stylesheet, which profile pages inject on
   // their own; chats on /messaging or the feed need it too or the popup stays light.
   try { injectStyles(); applyTheme(); } catch (e) { /* inline fallbacks still apply */ }
@@ -3000,6 +3889,8 @@ async function toggleAiPopup(editable, spark, opts) {
     return;
   }
   openSpark.slice().forEach((r) => removeSparkRec(r));
+
+  if (!signedIn()) { openSignedOutSpark({ form, editable, spark, anchor, invite }); return; }
 
   const box = document.createElement("div");
   box.className = "li-ai-popup";
@@ -3351,7 +4242,8 @@ function handleNavigation() {
   const first = !_navState;
   _navState = state;
   if (first) return;
-  for (const id of ["li-ai-analyze-btn", "li-icp-btn", "li-ai-panel", "li-icp-panel"]) document.getElementById(id)?.remove();
+  // Leaving a profile tears down both buttons and both panels; the next tick rebuilds them.
+  for (const p of Object.values(PANELS)) for (const id of [p.btnId, p.id]) document.getElementById(id)?.remove();
 }
 
 // LinkedIn mutates the DOM constantly: batch our work into at most one pass
