@@ -7,6 +7,8 @@ from apify_client import ApifyClient
 
 from services.matching import (normalize, phrase_pattern, first_match, all_matches, parse_size_range,
                                employee_count_range, expand_location, pts)
+from services.apify_token import current_apify_token
+from services.config_store import read_config, write_config
 
 APIFY_COMPANY_ACTOR_ID = os.getenv("APIFY_COMPANY_ACTOR_ID")
 
@@ -22,13 +24,11 @@ ICP_CONFIG_FILE = os.path.join(BASE_DIR, "icp_config.json")
 
 DEFAULT_ICP_CONFIG = {
     "EXACT_INDUSTRIES": [
-        "hospitals and health", "hospital", "health care services",
+        "hospitals and health", "hospital", "health care services","Healthcare","HealthTech"
     ],
 
     "RELATED_INDUSTRIES": [
-        "health, wellness & fitness",
-        "medical practices", "retail pharmacies",
-        "healthcare", "health",
+        "health, wellness & fitness","healthcare",
     ],
 
     "TIER_1_TITLES": [
@@ -117,24 +117,23 @@ def _to_list(value, fallback: list) -> list:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
-def get_icp_config() -> dict:
-    """Current keywords: icp_config.json (when present) merged over the defaults."""
+def _merge_icp_config(saved) -> dict:
+    """The saved keywords over the defaults; `None` (nothing saved yet) gives the defaults."""
     config = {key: list(defaults) for key, defaults in DEFAULT_ICP_CONFIG.items()}
     config["POINTS"] = dict(DEFAULT_ICP_POINTS)
-    try:
-        if os.path.exists(ICP_CONFIG_FILE):
-            with open(ICP_CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-            if isinstance(saved, dict):
-                for key, defaults in DEFAULT_ICP_CONFIG.items():
-                    if saved.get(key) is not None:
-                        config[key] = _to_list(saved[key], defaults)
-                config["POINTS"] = _clean_points(saved.get("POINTS"), DEFAULT_ICP_POINTS)
-                config["DISABLED"] = _disabled_map(saved)
-    except Exception:
-        pass
+    if isinstance(saved, dict):
+        for key, defaults in DEFAULT_ICP_CONFIG.items():
+            if saved.get(key) is not None:
+                config[key] = _to_list(saved[key], defaults)
+        config["POINTS"] = _clean_points(saved.get("POINTS"), DEFAULT_ICP_POINTS)
+        config["DISABLED"] = _disabled_map(saved)
     config.setdefault("DISABLED", {key: [] for key in DEFAULT_ICP_CONFIG})
     return config
+
+
+def get_icp_config() -> dict:
+    """Current keywords: icp_config.json (when present) merged over the defaults."""
+    return read_config(ICP_CONFIG_FILE, _merge_icp_config)
 
 
 def _disabled_map(config: dict) -> dict:
@@ -186,9 +185,7 @@ def save_icp_config(config: dict) -> dict:
     # rules produced it and older results stay traceable.
     clean["version"] = icp_config_version() + 1
 
-    with open(ICP_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(clean, f, indent=2, ensure_ascii=False)
-    return apply_icp_config(clean)
+    return apply_icp_config(write_config(ICP_CONFIG_FILE, clean))
 
 
 # Load the saved keywords (if any) as soon as the server starts
@@ -451,7 +448,7 @@ def calculate_icp(profile: dict) -> dict:
 
 def run_company_actor(profile_url: str) -> dict:
     try:
-        token = os.getenv("APIFY_API_TOKEN")
+        token = current_apify_token()
         if not token:
             return {}
         actor_id = os.getenv("APIFY_COMPANY_ACTOR_ID") or APIFY_COMPANY_ACTOR_ID

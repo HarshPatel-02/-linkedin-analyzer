@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import traceback
@@ -16,9 +16,13 @@ from services.ai_service import (generate_chat_suggestions, generate_outreach, g
 from services.icp_service import calculate_icp, run_company_actor, get_icp_config, save_icp_config
 from services.analysis_service import analyze_profile, activity_block
 from services.scoring_service import (compute_score, newest_post, get_activity_points, save_activity_points,
-                                      get_signal_keywords, save_signal_keywords)
+                                      get_signal_keywords, save_signal_keywords,
+                                      get_activity_rules, save_activity_rules)
+from services.apify_token import TOKEN_HEADER, bind_apify_token
 
-app = FastAPI(title="LinkedIn AI Analyzer API")
+# Every request binds the Apify token it carries, so each endpoint - and every thread it
+# starts - sees the token the extension sent with that request.
+app = FastAPI(title="LinkedIn AI Analyzer API", dependencies=[Depends(bind_apify_token)])
 
 # Only the extension talks to this server: its background worker and toolbar
 # popup (chrome-extension://…). Other websites can no longer call it from a browser.
@@ -27,7 +31,7 @@ app.add_middleware(
     allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", TOKEN_HEADER],
 )
 
 @app.get("/")
@@ -75,9 +79,10 @@ async def analyze(data: AnalyzeRequest):
                                   ") — Recent Activity was scored from the page instead.")
 
         if apify_data:
-            if data.mutual_connections:
-                apify_data["mutual_connections"] = data.mutual_connections
-            profile = map_apify_to_profile(apify_data, data.profile_url, posts_data)
+            # The page count, zero included: falling back to Apify's figure on a zero gave
+            # the mutual connections of the account Apify scrapes as.
+            profile = map_apify_to_profile(apify_data, data.profile_url, posts_data,
+                                           mutual_connections=data.mutual_connections)
             # Re-score with the details filled in through the Activity form
             edits = collect_form_edits(data.model_dump())
             # The score takes recency from dated Apify posts first; keep the shown
@@ -116,6 +121,9 @@ async def analyze(data: AnalyzeRequest):
             "timestamp":          profile.timestamp,
             "score_total":        profile.score_total,
             "score_label":        profile.score_label,
+            "score_uncapped":     profile.score_uncapped,
+            "failed_required":    profile.failed_required,
+            "mutual_min":         profile.mutual_min,
             "score_activity":     profile.score_activity,
             "score_posts":        profile.score_posts,
             "score_engagement":   profile.score_engagement,
@@ -180,7 +188,8 @@ async def profiles_analyze(data: AnalyzeRequest):
 
     try:
         if apify_data:
-            profile = map_apify_to_profile(apify_data, profile_url, posts_data)
+            profile = map_apify_to_profile(apify_data, profile_url, posts_data,
+                                           mutual_connections=payload.get("mutual_connections") or 0)
             edits = collect_form_edits(payload)
             if edits.get("activity") and newest_post(list(posts_data or []) + list(apify_data.get("posts") or [])):
                 edits.pop("activity")
@@ -232,7 +241,9 @@ async def collect(data: CollectRequest):
 
     try:
         if apify_data:
-            profile = map_apify_to_profile(apify_data, url, posts_data)
+            # `scraped` is the extension's read of the user's own view of the page.
+            profile = map_apify_to_profile(apify_data, url, posts_data,
+                                           mutual_connections=(data.scraped or {}).get("mutual_connections") or 0)
         else:
             allowed = set(ProfileData.model_fields.keys())
             profile = ProfileData(**{k: v for k, v in (data.scraped or {}).items() if k in allowed})
@@ -325,31 +336,44 @@ async def write_icp_config(data: IcpConfig):
     except Exception as e:
         raise HTTPException(500, str(e))
 
-@app.get("/activity-points")
-async def read_activity_points():
-    """Max points per Activity factor (activity_points.json merged over the defaults)."""
-    return get_activity_points()
+def settings_routes(path: str, read, write, *, reads: str, writes: str) -> None:
+    """A settings file the extension reads and writes back: GET returns it, POST saves it.
 
-@app.post("/activity-points")
-async def write_activity_points(data: dict):
-    """Save points edited in the Activity form; {"reset": true} restores the defaults."""
-    try:
-        return save_activity_points(data)
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    Every one of these was the same nine lines around a different pair of functions.
+    `/icp-config` is deliberately not one of them: it posts a typed model, so a bad
+    payload there is a 422 from FastAPI rather than a 500 from here.
+    """
+    name = path.strip("/").replace("-", "_")
 
-@app.get("/activity-keywords")
-async def read_activity_keywords():
-    """Hiring / growth signal keywords for the Activity score."""
-    return get_signal_keywords()
+    async def _read():
+        return read()
 
-@app.post("/activity-keywords")
-async def write_activity_keywords(data: dict):
-    """Save the signal keyword chips from the Activity form; {"reset": true} restores the defaults."""
-    try:
-        return save_signal_keywords(data)
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    async def _write(data: dict):
+        try:
+            return write(data)
+        except Exception as e:
+            raise HTTPException(500, str(e))
+
+    _read.__name__, _read.__doc__ = f"read_{name}", reads
+    _write.__name__, _write.__doc__ = f"write_{name}", writes
+    app.get(path)(_read)
+    app.post(path)(_write)
+
+
+settings_routes(
+    "/activity-points", get_activity_points, save_activity_points,
+    reads="Max points per Activity factor (activity_points.json merged over the defaults).",
+    writes='Save points edited in the Activity form; {"reset": true} restores the defaults.')
+
+settings_routes(
+    "/activity-rules", get_activity_rules, save_activity_rules,
+    reads="Requirements for the Activity score, e.g. a minimum of mutual connections.",
+    writes="Save requirements edited in the Activity form.")
+
+settings_routes(
+    "/activity-keywords", get_signal_keywords, save_signal_keywords,
+    reads="Hiring / growth signal keywords for the Activity score.",
+    writes='Save the signal keyword chips from the Activity form; {"reset": true} restores the defaults.')
 
 @app.post("/suggest-messages")
 async def suggest_messages(data: SuggestRequest):

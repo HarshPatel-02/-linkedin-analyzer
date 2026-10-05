@@ -3,8 +3,10 @@ from datetime import datetime, timezone
 from apify_client import ApifyClient
 from models import ProfileData
 from services.scoring_service import time_ago, compute_score, newest_post, split_own_posts
+from services.apify_token import MISSING, current_apify_token
 
-APIFY_API_TOKEN        = os.getenv("APIFY_API_TOKEN")
+# The token is not here: it arrives with each request from the extension (see
+# services/apify_token.py). The actor IDs are deployment settings and stay in .env.
 APIFY_ACTOR_ID         = os.getenv("APIFY_ACTOR_ID")
 APIFY_POSTS_ACTOR_ID   = os.getenv("APIFY_POSTS_ACTOR_ID")
 APIFY_COMPANY_ACTOR_ID = os.getenv("APIFY_COMPANY_ACTOR_ID")
@@ -19,11 +21,11 @@ def _env(name: str, fallback: str = "") -> str:
 def run_apify_actor(profile_url: str) -> dict:
     """Run the profile actor, fall back to the company actor.
     Any failure is collected so the caller can report WHY no data came back."""
-    token      = _env("APIFY_API_TOKEN", APIFY_API_TOKEN)
+    token      = current_apify_token()
     actor_id   = _env("APIFY_ACTOR_ID", APIFY_ACTOR_ID)
     company_id = _env("APIFY_COMPANY_ACTOR_ID", APIFY_COMPANY_ACTOR_ID)
     if not token:
-        raise Exception("APIFY_API_TOKEN is empty — add it to .env and restart the server")
+        raise Exception(MISSING)
     if not actor_id:
         raise Exception("APIFY_ACTOR_ID is empty — add it to .env and restart the server")
 
@@ -61,7 +63,6 @@ def run_apify_actor(profile_url: str) -> dict:
                 item["followers"] = item.get("follower_count", 0)
                 item["connections"] = item.get("connection_count", 0)
                 item["avatar"] = item.get("profile_picture_url", "")
-                item["mutual_connections"] = item.get("mutual_connections", 0)
                 return item
         errors.append(f"company actor {company_id}: ran OK but {len(items2)} item(s) without a name")
     except Exception as e:
@@ -71,25 +72,27 @@ def run_apify_actor(profile_url: str) -> dict:
 
 def run_posts_actor(profile_url: str, max_posts: int = 20, errors: list | None = None) -> list:
     """Posts from the profile's activity feed, newest first (the actor sorts by
-    date), limited to the last 90 days. `errors` (when given) collects the reason
-    a fetch came back empty, so the caller can tell "no posts" from "fetch failed"."""
-    token    = _env("APIFY_API_TOKEN", APIFY_API_TOKEN)
+    date). `errors` (when given) collects the reason a fetch came back empty, so
+    the caller can tell "no posts" from "fetch failed"."""
+    token    = current_apify_token()
     actor_id = _env("APIFY_POSTS_ACTOR_ID", APIFY_POSTS_ACTOR_ID)
     if not token or not actor_id:
-        print(f"[LI-AI] posts actor skipped: APIFY_API_TOKEN/APIFY_POSTS_ACTOR_ID not set in .env")
+        why = MISSING if not token else "APIFY_POSTS_ACTOR_ID is not set in .env"
+        print(f"[LI-AI] posts actor skipped: {why}")
         if errors is not None:
-            errors.append("posts actor skipped: APIFY_API_TOKEN/APIFY_POSTS_ACTOR_ID not set in .env")
+            errors.append(f"posts actor skipped: {why}")
         return []
     try:
-        from datetime import timedelta
-
-        limit_date = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
-
         client = ApifyClient(token)
         run = client.actor(actor_id).call(run_input={
+            # This actor takes target URLs. Passing a bare username under another
+            # field name is accepted silently and the run comes back empty.
             "targetUrls":      [profile_url],
+            # The newest posts, with no date floor. A 90-day cut-off looked sensible
+            # but hid the answer to "when did they last post": somebody whose last
+            # post is four months old returned nothing, and the panel fell back to a
+            # stale post embedded in the profile and reported that as their latest.
             "maxPosts":        max_posts,
-            "postedLimitDate": limit_date,
             # Reposts stay in: they count as activity. split_own_posts keeps their
             # text/engagement (the original author's) out of everything else.
             "includeReposts":    True,
@@ -105,7 +108,10 @@ def run_posts_actor(profile_url: str, max_posts: int = 20, errors: list | None =
             errors.append(f"posts actor {actor_id}: {type(e).__name__}: {e}")
         return []
 
-def map_apify_to_profile(data: dict, profile_url: str, posts_data: list) -> ProfileData:
+def map_apify_to_profile(data: dict, profile_url: str, posts_data: list, mutual_connections: int = 0) -> ProfileData:
+    """`mutual_connections` is the count from the user's own view of the profile page.
+    Apify's own figure is never used: it scrapes as a different LinkedIn account, so the
+    connections it calls mutual are shared with that account, not with the user."""
 
     avatar   = data.get("avatar") or ""
     name     = data.get("name") or (
@@ -229,7 +235,7 @@ def map_apify_to_profile(data: dict, profile_url: str, posts_data: list) -> Prof
             return 0
     followers          = _count(data.get("followers"))
     connections        = _count(data.get("connections"))
-    mutual_connections = _count(data.get("mutual_connections"))
+    mutual_connections = _count(mutual_connections)
 
     profile = ProfileData(
         avatar=avatar, name=name, country=country, position=position,

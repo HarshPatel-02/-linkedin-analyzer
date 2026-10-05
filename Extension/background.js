@@ -7,6 +7,16 @@ function apiBase() {
     chrome.storage.local.get([LI_SETTINGS_KEY], (r) => res(liApiBase((r && r[LI_SETTINGS_KEY]) || {}))));
 }
 
+// The Apify token set in the popup's Development section, read per request like the
+// URLs above so a newly saved token is used on the very next call.
+function apifyTokenHeader() {
+  return new Promise((res) =>
+    chrome.storage.local.get([LI_DEV_KEY], (r) => {
+      const token = (((r && r[LI_DEV_KEY]) || {}).apifyToken || "").trim();
+      res(token ? { "X-Apify-Token": token } : {});
+    }));
+}
+
 // Alarms can be cleared on browser restart → (re)create on install and startup.
 function startFollowupAlarm() {
   chrome.alarms.create("li-followups", { periodInMinutes: 60 });
@@ -28,9 +38,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const init = { method: msg.method || "GET", signal: ctrl.signal };
+      // Every analyzer call carries the token, GETs included: the analyzer is the one
+      // service that talks to Apify, and it no longer reads a token of its own.
+      const init = { method: msg.method || "GET", signal: ctrl.signal, headers: await apifyTokenHeader() };
       if (msg.body !== undefined) {
-        init.headers = { "Content-Type": "application/json" };
+        init.headers["Content-Type"] = "application/json";
         init.body = JSON.stringify(msg.body);
       }
       const base = await apiBase();
@@ -122,12 +134,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const leads = Object.values(r[LI_LEADS_KEY] || {});
         if (!leads.length) { sendResponse({ ok: false, error: "No leads logged yet — analyze a profile first." }); return; }
         sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads(leads)) }) });
+      } else if (msg.action === "icps") {
+        // One small response: the published ICPs and which of them is scoring.
+        // Fetching the full ICP list plus the selection separately pulled ~13 KB of
+        // rule configuration to fill a dropdown that needs a few hundred bytes.
+        const list = await adminFetch("/icp/options");
+        sendResponse({ ok: true, data: { icps: list || [] } });
+      } else if (msg.action === "icp-selected") {
+        // The full rules of the ICP in force, so the panel can show what it scores
+        // with. The options list deliberately carries no configuration.
+        sendResponse({ ok: true, data: await adminFetch("/icp/selected") });
+      } else if (msg.action === "save-rules") {
+        // Editing rules publishes a new ICP version, so the admin reads exactly what
+        // was saved here. The response is that published ICP.
+        sendResponse({ ok: true, data: await adminFetch("/icp/selected/rules", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fields: msg.fields || {} }),
+        }, 30000) });
+      } else if (msg.action === "select-icp") {
+        // Picking in the extension moves the workspace selection, so the admin
+        // panel shows the same ICP rather than its own stale choice.
+        sendResponse({ ok: true, data: await adminFetch("/icp/selected", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ icpId: msg.icpId || null }),
+        }) });
       } else if (msg.action === "analyze") {
         // The one call that produces a score: the admin collects, scores against
         // the selected ICP, stores the result and returns it. Collection runs
         // several LinkedIn fetches, so it gets a long timeout.
+        // Collection happens in the analyzer, reached through the admin, so the admin
+        // relays the token. This is the only admin call that carries it.
         sendResponse({ ok: true, data: await adminFetch("/extension/analyze", {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, await apifyTokenHeader()),
           body: JSON.stringify({
             profileUrl: msg.profileUrl || "", scraped: msg.scraped || {},
             collect: msg.collect !== false, icpId: msg.icpId || null,
@@ -146,6 +184,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: false, error: "unknown admin action" });
       }
     } catch (e) { sendResponse({ ok: false, error: e.message }); }
+  })();
+  return true;
+});
+
+// ─── Sign in from the page ────────────────────────────────────────────────────
+// The "Open the extension" button on the in-page sign-in prompt. A content script
+// cannot open the toolbar popup itself, and chrome.action.openPopup() is Chrome
+// 127+ and can still be refused, so the answer says which happened and the page
+// falls back to pointing at the toolbar icon.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== "li-open-popup") return false;
+  (async () => {
+    try {
+      if (!chrome.action || !chrome.action.openPopup) throw new Error("this Chrome version cannot open it for you");
+      await chrome.action.openPopup();
+      sendResponse({ ok: true });
+    } catch (e) {
+      sendResponse({ ok: false, error: (e && e.message) || "could not open the popup" });
+    }
   })();
   return true;
 });

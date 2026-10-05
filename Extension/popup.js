@@ -147,6 +147,8 @@ function loadApiBase(cb) {
     const settings = (r && r[LI_SETTINGS_KEY]) || {};
     API_BASE = liApiBase(settings);
     $("api-base").value = settings.apiBase || "";
+    $("admin-base").value = settings.adminBase || "";
+    $("admin-base").placeholder = LI_ADMIN_DEFAULT;
     $("api-base").placeholder = LI_API_DEFAULT;
     if (cb) cb();
   });
@@ -174,7 +176,29 @@ async function saveApiBase(url) {
   });
 }
 
-$("api-save").onclick = () => saveApiBase($("api-base").value);
+$("api-save").onclick = () => { saveApiBase($("api-base").value); saveAdminBase($("admin-base").value); };
+
+// The admin backend is where scores and ICP rules live, so it gets the same
+// treatment: saved with the other settings, tested straight after saving.
+async function saveAdminBase(url) {
+  const clean = liCleanApiBase(url);
+  if (url.trim() && !clean) { $("api-status").textContent = "❌ Admin URL is not a URL"; return; }
+  chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
+    const settings = Object.assign({}, (r && r[LI_SETTINGS_KEY]) || {}, { adminBase: clean });
+    chrome.storage.local.set({ [LI_SETTINGS_KEY]: settings }, async () => {
+      const base = liAdminBase(settings);
+      try {
+        const resp = await fetchWithTimeout(base + "/extension/status", {}, 12000);
+        const data = await resp.json().catch(() => ({}));
+        $("api-status").textContent = resp.ok
+          ? "✅ Admin connected · scoring ICP: " + ((data.activeIcp && data.activeIcp.name) || "none selected")
+          : "⚠️ Admin reached but returned " + resp.status;
+      } catch (e) {
+        $("api-status").textContent = "❌ Admin " + base + " — " + e.message;
+      }
+    });
+  });
+}
 $("api-hosted").onclick = () => { $("api-base").value = LI_API_HOSTED; saveApiBase(LI_API_HOSTED); };
 
 // ─── My pitch (backend: /pitch-config → pitch_config.json) ────────────────────
@@ -233,5 +257,168 @@ $("pitch-form").onsubmit = async (e) => {
   }
 };
 
-render();
-loadApiBase();
+// ─── Development (developer mode only) ───────────────────────────────────────
+// Five clicks on the title within two seconds toggle developer mode. The token lives
+// under its own key (LI_DEV_KEY), read by background.js on every request, so saving
+// here changes the very next Apify call. The saved token is never put back into the
+// page: the field starts empty and only a masked form is shown.
+function loadDev(cb) {
+  chrome.storage.local.get([LI_DEV_KEY], (r) => cb((r && r[LI_DEV_KEY]) || {}));
+}
+
+function updateDev(patch, cb) {
+  loadDev((dev) => {
+    const next = Object.assign({}, dev, patch);
+    Object.keys(next).forEach((k) => { if (next[k] === "" || next[k] == null) delete next[k]; });
+    chrome.storage.local.set({ [LI_DEV_KEY]: next }, () => cb && cb(next));
+  });
+}
+
+// A fixed run of dots, so the mask never gives away the token's length. Too short a
+// value shows no tail at all rather than most of itself.
+function maskToken(token) {
+  if (!token) return "";
+  const head = token.startsWith("apify_api_") ? "apify_api_" : "";
+  return head + "•".repeat(10) + (token.length > 12 ? token.slice(-4) : "");
+}
+
+function renderDev(dev) {
+  $("dev-section").hidden = !dev.devMode;
+  $("apify-saved").textContent = dev.apifyToken
+    ? "Saved · " + maskToken(dev.apifyToken)
+    : "No token saved — Apify calls are skipped and scores use page data only.";
+  $("apify-clear").disabled = !dev.apifyToken;
+}
+
+function setReveal(on) {
+  $("apify-token").type = on ? "text" : "password";
+  $("apify-reveal").textContent = on ? "Hide" : "Show";
+  $("apify-reveal").setAttribute("aria-pressed", on ? "true" : "false");
+}
+
+let titleClicks = [];
+document.querySelector("header h1").addEventListener("click", () => {
+  const now = Date.now();
+  titleClicks = titleClicks.filter((t) => now - t < 2000).concat(now);
+  if (titleClicks.length < 5) return;
+  titleClicks = [];
+  loadDev((dev) => updateDev({ devMode: !dev.devMode }, (next) => {
+    renderDev(next);
+    if (next.devMode) {
+      document.querySelector('nav [data-tab="pitch"]').click();
+      $("dev-status").textContent = "Developer mode on.";
+      $("dev-section").scrollIntoView({ block: "nearest" });
+    } else {
+      // Hiding the section is not switching the token off.
+      $("api-status").textContent = next.apifyToken
+        ? "Developer mode off — the saved Apify token stays in use."
+        : "Developer mode off.";
+    }
+  }));
+});
+
+$("apify-reveal").onclick = () => setReveal($("apify-token").type === "password");
+
+function saveApifyToken() {
+  const token = $("apify-token").value.trim();
+  if (!token) { $("dev-status").textContent = "Paste a token first — or Clear to remove the saved one."; return; }
+  if (/\s/.test(token)) { $("dev-status").textContent = "❌ A token has no spaces — check what was pasted."; return; }
+  updateDev({ apifyToken: token }, (next) => {
+    $("apify-token").value = "";
+    setReveal(false);
+    renderDev(next);
+    $("dev-status").textContent = token.startsWith("apify_api_")
+      ? "✅ Saved — the next Apify call uses it."
+      : "⚠️ Saved, but Apify tokens start with apify_api_ — check it's the right value.";
+  });
+}
+
+$("apify-save").onclick = saveApifyToken;
+$("apify-token").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveApifyToken(); } });
+
+$("apify-clear").onclick = () => {
+  if (!confirm("Remove the saved Apify token? Apify calls are skipped until a new one is saved.")) return;
+  updateDev({ apifyToken: "" }, (next) => {
+    renderDev(next);
+    $("dev-status").textContent = "Token removed.";
+  });
+};
+
+// ─── Sign-in gate (session in leads.js: liSignIn / liSignOut / liGetAuth) ────
+// The popup is either the sign-in screen or the app, never both. Everything the
+// app does — reading leads, calling the backend, the Apify token — waits behind
+// this, and signing out here locks the LinkedIn page panels too: content.js
+// watches the same storage key.
+let appStarted = false;
+
+function showSignInError(message) {
+  $("signin-error").hidden = !message;
+  $("signin-error-text").textContent = message || "";
+}
+
+function setSignInBusy(busy) {
+  $("signin-submit").disabled = busy;
+  $("signin-submit").textContent = busy ? "Signing in…" : "Sign in";
+  $("signin-email").disabled = busy;
+  $("signin-password").disabled = busy;
+}
+
+function showGate() {
+  $("app").hidden = true;
+  $("auth-gate").hidden = false;
+  $("signin-password").value = "";
+  setSignInReveal(false);
+  showSignInError("");
+  setSignInBusy(false);
+  $("signin-email").focus();
+}
+
+// The app is only ever started once, however often the gate is crossed: its
+// listeners are bound at load and its first paint reads storage.
+function showApp(auth) {
+  $("auth-gate").hidden = true;
+  $("app").hidden = false;
+  $("account-email").textContent = auth.email;
+  $("account-email").title = "Signed in as " + auth.email;
+  if (appStarted) { render(); return; }
+  appStarted = true;
+  render();
+  loadApiBase();
+  loadDev(renderDev);
+}
+
+function setSignInReveal(on) {
+  $("signin-password").type = on ? "text" : "password";
+  $("signin-reveal").textContent = on ? "Hide" : "Show";
+  $("signin-reveal").setAttribute("aria-pressed", on ? "true" : "false");
+}
+
+$("signin-reveal").onclick = () => setSignInReveal($("signin-password").type === "password");
+
+$("signin-form").onsubmit = async (e) => {
+  e.preventDefault();
+  showSignInError("");
+  setSignInBusy(true);
+  try {
+    showApp(await liSignIn($("signin-email").value, $("signin-password").value));
+    $("signin-password").value = "";
+  } catch (err) {
+    showSignInError(err.message || "Could not sign in — try again.");
+    setSignInBusy(false);
+    // Send them back to the field that needs fixing, not to the top of the form.
+    (/password/i.test(err.message || "") ? $("signin-password") : $("signin-email")).focus();
+    return;
+  }
+  setSignInBusy(false);
+};
+
+$("sign-out").onclick = () => liSignOut(showGate);
+
+// Signed out in another window (or from a LinkedIn tab) — follow it here.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes[LI_AUTH_KEY]) return;
+  const auth = changes[LI_AUTH_KEY].newValue;
+  if (liAuthValid(auth)) showApp(auth); else if ($("app").hidden === false) showGate();
+});
+
+liGetAuth((auth) => { if (liAuthValid(auth)) showApp(auth); else showGate(); });
