@@ -26,6 +26,7 @@ def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(icp_service, "ICP_CONFIG_FILE", str(tmp_path / "icp_config.json"))
     monkeypatch.setattr(scoring_service, "ACTIVITY_POINTS_FILE", str(tmp_path / "activity_points.json"))
     monkeypatch.setattr(scoring_service, "ACTIVITY_KEYWORDS_FILE", str(tmp_path / "activity_keywords.json"))
+    monkeypatch.setattr(scoring_service, "ACTIVITY_RULES_FILE", str(tmp_path / "activity_rules.json"))
     monkeypatch.setattr(ai_service, "PITCH_CONFIG_FILE", str(tmp_path / "pitch_config.json"))
     ai_service._exhausted.clear()
     ai_service._posts_cache.clear()

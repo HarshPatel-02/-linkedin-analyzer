@@ -25,6 +25,8 @@ class AnalyzeRequest(BaseModel):
     activity:          str = ""
     posts_30_days:     int = 0
     posts_90_days:     int = 0
+    # Posts read whose date could not be parsed: counted, never assumed recent.
+    posts_undated:     int = 0
     avg_engagement:    float = 0.0
     avg_likes:         float = 0.0
     avg_comments:      float = 0.0
@@ -67,6 +69,7 @@ class ProfileData(BaseModel):
     avg_engagement:     float = 0.0
     posts_30_days:      int   = 0
     posts_90_days:      int   = 0
+    posts_undated:      int   = 0
     avg_likes:          float = 0.0
     avg_comments:       float = 0.0
     avg_reposts:        float = 0.0
@@ -80,6 +83,10 @@ class ProfileData(BaseModel):
     max_mutuals:        int   = 10
     score_raw:          int   = 0
     score_max:          int   = 100
+    # A requirement that was not met caps score_total; these say which and from what
+    mutual_min:         int       = 0    # required mutual connections; 0 = none
+    score_uncapped:     int       = 0    # score_total before a failed requirement capped it
+    failed_required:    list[str] = []   # e.g. ["2+ mutual connections (has 0)"]
     # What the score was based on (shown in the panel, used for outreach suggestions)
     signal_hits:          dict      = {}   # {"hiring": "we're hiring", ...} — lists that matched
     completeness_missing: list[str] = []   # e.g. ["about", "skills"]

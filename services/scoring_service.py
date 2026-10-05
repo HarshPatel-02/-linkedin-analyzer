@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fractions import Fraction
 from urllib.parse import unquote
 from models import ProfileData
+from services.config_store import read_config, write_config
 from services.matching import normalize, first_match, pts
 
 # ─── Editable points ──────────────────────────────────────────────────────────
@@ -40,22 +41,43 @@ def _clean_points(values, defaults: dict, fallback: dict) -> dict:
 
 
 def get_activity_points() -> dict:
-    try:
-        if os.path.exists(ACTIVITY_POINTS_FILE):
-            with open(ACTIVITY_POINTS_FILE, "r", encoding="utf-8") as f:
-                return _clean_points(json.load(f), DEFAULT_ACTIVITY_POINTS, DEFAULT_ACTIVITY_POINTS)
-    except Exception:
-        pass
-    return dict(DEFAULT_ACTIVITY_POINTS)
+    return read_config(ACTIVITY_POINTS_FILE,
+                        lambda v: _clean_points(v, DEFAULT_ACTIVITY_POINTS, DEFAULT_ACTIVITY_POINTS))
 
 
 def save_activity_points(values: dict) -> dict:
     """Keys left out keep their saved value; {"reset": true} restores the defaults."""
     points = (dict(DEFAULT_ACTIVITY_POINTS) if isinstance(values, dict) and values.get("reset")
               else _clean_points(values, DEFAULT_ACTIVITY_POINTS, get_activity_points()))
-    with open(ACTIVITY_POINTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(points, f, indent=2)
-    return points
+    return write_config(ACTIVITY_POINTS_FILE, points)
+
+
+# Requirements, edited in the Activity form (activity_rules.json via GET/POST
+# /activity-rules). Kept out of the points file on purpose: every value there is summed
+# into the maximum, so a "2" would quietly become two more possible points.
+ACTIVITY_RULES_FILE = os.path.join(BASE_DIR, "activity_rules.json")
+DEFAULT_ACTIVITY_RULES = {"mutual_min": 0}      # 0 = no requirement
+
+# Failing a requirement caps the total here: the top of "Difficult to Engage".
+REQUIRED_CAP = 39
+
+
+def _clean_rules(values, fallback: dict) -> dict:
+    out = dict(fallback)
+    if isinstance(values, dict) and values.get("mutual_min") is not None:
+        try:
+            out["mutual_min"] = max(0, min(500, int(round(float(values["mutual_min"])))))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def get_activity_rules() -> dict:
+    return read_config(ACTIVITY_RULES_FILE, lambda v: _clean_rules(v, DEFAULT_ACTIVITY_RULES))
+
+
+def save_activity_rules(values: dict) -> dict:
+    return write_config(ACTIVITY_RULES_FILE, _clean_rules(values, get_activity_rules()))
 
 
 # Hiring / growth signal keywords (edited as chips in the Activity form, saved to
@@ -84,32 +106,26 @@ def _kw_list(value, fallback: list) -> list:
     return out
 
 
+def _clean_keywords(values, fallback: dict) -> dict:
+    """One list per known key; a key left out keeps `fallback`."""
+    out = {k: list(v) for k, v in fallback.items()}
+    if isinstance(values, dict):
+        for key in DEFAULT_SIGNAL_KEYWORDS:
+            if values.get(key) is not None:
+                out[key] = _kw_list(values[key], out[key])
+    return out
+
+
 def get_signal_keywords() -> dict:
-    lists = {k: list(v) for k, v in DEFAULT_SIGNAL_KEYWORDS.items()}
-    try:
-        if os.path.exists(ACTIVITY_KEYWORDS_FILE):
-            with open(ACTIVITY_KEYWORDS_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-            if isinstance(saved, dict):
-                for k in DEFAULT_SIGNAL_KEYWORDS:
-                    if saved.get(k) is not None:
-                        lists[k] = _kw_list(saved[k], lists[k])
-    except Exception:
-        pass
-    return lists
+    return read_config(ACTIVITY_KEYWORDS_FILE, lambda v: _clean_keywords(v, DEFAULT_SIGNAL_KEYWORDS))
 
 
 def save_signal_keywords(values: dict) -> dict:
     """Lists left out keep their saved value; {"reset": true} restores the defaults."""
-    if isinstance(values, dict) and values.get("reset"):
-        lists = {k: list(v) for k, v in DEFAULT_SIGNAL_KEYWORDS.items()}
-    else:
-        current = get_signal_keywords()
-        lists = {k: (current[k] if not isinstance(values, dict) or values.get(k) is None
-                     else _kw_list(values[k], current[k])) for k in DEFAULT_SIGNAL_KEYWORDS}
-    with open(ACTIVITY_KEYWORDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(lists, f, indent=2, ensure_ascii=False)
-    return lists
+    lists = ({k: list(v) for k, v in DEFAULT_SIGNAL_KEYWORDS.items()}
+             if isinstance(values, dict) and values.get("reset")
+             else _clean_keywords(values, get_signal_keywords()))
+    return write_config(ACTIVITY_KEYWORDS_FILE, lists)
 
 
 def _scaled(earned: float, default_max: float, new_max: float) -> int:
@@ -422,13 +438,19 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
         days = max(0, days)
         if days <= 90: posts_90_days += 1
         if days <= 30: posts_30_days += 1
-    if posts_90_days == 0 and posts_with_no_date > 0:
-        posts_90_days = posts_with_no_date
-    # Values typed into the Activity form fill in whatever Apify could not give us
-    if posts_30_days == 0 and profile.posts_30_days:
-        posts_30_days = int(profile.posts_30_days)
-    if posts_90_days == 0 and profile.posts_90_days:
-        posts_90_days = int(profile.posts_90_days)
+    # An undated post used to be counted as if it were posted inside the 90-day window,
+    # which scored 12 undated posts 20/20 while 12 posts known to be two years old scored
+    # 0/20 — the less we knew, the better somebody did. A date we cannot read is not
+    # evidence of posting recently, so it earns nothing and is reported instead.
+    # Values typed into the Activity form fill in only when NOTHING could be read. Once
+    # posts are in hand, "none of them fall in the window" is an answer, not a gap: a
+    # profile whose 30 posts are all from 2015 was scoring 20/20 from a 10 left in the
+    # form, while Recent Activity on the same panel reported "last posted 10 years ago".
+    if not posts:
+        if posts_30_days == 0 and profile.posts_30_days:
+            posts_30_days = int(profile.posts_30_days)
+        if posts_90_days == 0 and profile.posts_90_days:
+            posts_90_days = int(profile.posts_90_days)
     # A post from the last 30 days is inside the 90-day window too
     posts_90_days = max(posts_90_days, posts_30_days)
     score_posts = pts(P["posting_frequency"], _tier(posts_90_days, POSTING_TIERS))
@@ -473,7 +495,17 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
                                                          len(COMPLETENESS_PARTS)))
 
     # MUTUAL_CONNECTIONS
-    score_mutuals = pts(P["mutual_connections"], _tier(int(profile.mutual_connections or 0), MUTUAL_TIERS))
+    # With a required minimum set, that number IS the bar: reaching it earns the factor's
+    # whole points and falling short earns none. Scoring 3 mutuals as 2/10 while the
+    # administrator had asked for "at least 2" contradicted the rule they wrote.
+    # With no requirement (mutual_min = 0) the default ladder decides instead.
+    R = get_activity_rules()
+    mutuals = int(profile.mutual_connections or 0)
+    if R["mutual_min"]:
+        mutual_share = Fraction(1) if mutuals >= R["mutual_min"] else Fraction(0)
+    else:
+        mutual_share = _tier(mutuals, MUTUAL_TIERS)
+    score_mutuals = pts(P["mutual_connections"], mutual_share)
 
     # HIRING_GROWTH_SIGNALS — keyword lists editable in the Activity form (activity_keywords.json),
     # whole-word matches in the About, headline, position and the 5 newest OWN posts
@@ -502,6 +534,14 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
     # Shown out of 100 whatever the points add up to (the defaults total 100)
     total = pts(100, Fraction(raw_total, max_total)) if max_total else 0
 
+    # A required minimum of mutual connections: falling short caps the whole score,
+    # however active the person is - "compulsory" means not a good lead without it.
+    uncapped = total
+    failed_required = []
+    if R["mutual_min"] and mutuals < R["mutual_min"]:
+        failed_required.append(f"{R['mutual_min']}+ mutual connections (has {mutuals})")
+        total = min(total, REQUIRED_CAP)
+
     if total >= 70:   label = "\U0001f7e2 Ready to Engage"
     elif total >= 40: label = "\U0001f7e1 Needs Nurturing"
     else:             label = "\U0001f534 Difficult to Engage"
@@ -509,6 +549,9 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
     return {
         "score_total":        total,
         "score_label":        label,
+        "score_uncapped":     uncapped,
+        "failed_required":    failed_required,
+        "mutual_min":         R["mutual_min"],
         "score_activity":     score_activity,
         "score_posts":        score_posts,
         "score_engagement":   score_engagement,
@@ -525,6 +568,7 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
         "score_max":          max_total,
         "avg_engagement":     round(avg_engagement, 1),
         "posts_30_days":      posts_30_days,
+        "posts_undated":      posts_with_no_date,
         "posts_90_days":      posts_90_days,
         "avg_likes":          round(avg_likes, 1),
         "avg_comments":       round(avg_comments, 1),

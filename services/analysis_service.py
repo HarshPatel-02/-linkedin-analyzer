@@ -141,6 +141,7 @@ def analyze_profile(profile: ProfileData, raw_data: dict | None, posts_data: lis
             "score_activity", "score_posts", "score_engagement", "score_completeness",
             "score_signals", "score_mutuals", "max_activity", "max_posts", "max_engagement",
             "max_completeness", "max_signals", "max_mutuals", "score_label", "engagement_label",
-            "completeness_missing", "signal_hits") if k in activity},
+            "completeness_missing", "signal_hits", "score_uncapped", "failed_required", "mutual_min")
+            if k in activity},
         "activity_points": get_activity_points(),
     }

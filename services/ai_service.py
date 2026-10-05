@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 
 from services.actor_service import run_posts_actor
+from services.config_store import read_config, write_config
 from services.matching import find_phrase, normalize
 from services.scoring_service import parse_activity_to_days, split_own_posts
 
@@ -36,23 +37,23 @@ DEFAULT_PITCH = {
 }
 
 
+def _merge_pitch(saved) -> dict:
+    """The saved pitch over the defaults; a blank field is treated as unset."""
+    pitch = dict(DEFAULT_PITCH)
+    if isinstance(saved, dict):
+        pitch.update({k: str(v).strip() for k, v in saved.items() if k in DEFAULT_PITCH and str(v).strip()})
+    return pitch
+
+
 def get_pitch_config() -> dict:
     """Saved pitch (pitch_config.json) merged over the defaults."""
-    pitch = dict(DEFAULT_PITCH)
-    try:
-        with open(PITCH_CONFIG_FILE, encoding="utf-8") as f:
-            saved = json.load(f)
-        pitch.update({k: str(v).strip() for k, v in saved.items() if k in DEFAULT_PITCH and str(v).strip()})
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    return pitch
+    return read_config(PITCH_CONFIG_FILE, _merge_pitch)
 
 
 def save_pitch_config(data: dict) -> dict:
     pitch = get_pitch_config()
     pitch.update({k: str(v).strip() for k, v in data.items() if k in DEFAULT_PITCH and v is not None})
-    with open(PITCH_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(pitch, f, indent=2, ensure_ascii=False)
+    write_config(PITCH_CONFIG_FILE, pitch)
     return get_pitch_config()
 
 
@@ -64,8 +65,7 @@ def _pitch_for(sender_role) -> dict:
 
 
 def _plain_role(value) -> str:
-    import re as _re
-    return _re.sub(r"\s+", " ", str(value or "")).strip()[:120]
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:120]
 
 
 def _models() -> list[str]:
@@ -127,9 +127,11 @@ def recent_post_texts(profile_url: str) -> list[str]:
     if hit and time.time() - hit[0] < POSTS_CACHE_TTL:
         return hit[1]
     texts = []
+    errors: list = []
     # Own posts only: a repost's text is someone else's words — reading a "pain
     # point" out of it would personalise the message to the wrong person.
-    own, _ = split_own_posts(run_posts_actor(profile_url, max_posts=POSTS_FOR_PAIN + 3), profile_url)
+    own, _ = split_own_posts(run_posts_actor(profile_url, max_posts=POSTS_FOR_PAIN + 3, errors=errors),
+                             profile_url)
     for post in own:
         if not isinstance(post, dict):
             continue
@@ -140,7 +142,10 @@ def recent_post_texts(profile_url: str) -> list[str]:
             texts.append(text[:600])
         if len(texts) >= POSTS_FOR_PAIN:
             break
-    _posts_cache[profile_url] = (time.time(), texts)
+    # Only a real answer is worth remembering. An empty list caused by a missing token
+    # or a failed fetch would otherwise hide a token saved a minute later for six hours.
+    if not errors:
+        _posts_cache[profile_url] = (time.time(), texts)
     return texts
 
 
