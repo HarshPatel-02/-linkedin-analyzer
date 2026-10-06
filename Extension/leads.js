@@ -26,6 +26,8 @@ function liApiBase(settings) {
 // database. Scores shown here come from it, so the extension and the admin panel
 // can never disagree about the same person.
 const LI_ADMIN_DEFAULT = "http://127.0.0.1:8001/api";
+// Where the admin's web app is, when the admin doesn't say (its /auth/config does).
+const LI_ADMIN_UI_DEFAULT = "http://localhost:5173";
 
 function liAdminBase(settings) {
   return liCleanApiBase((settings || {}).adminBase) || LI_ADMIN_DEFAULT;
@@ -101,66 +103,144 @@ function liLeadsToCsv(leads) {
 }
 
 // ─── Sign-in ──────────────────────────────────────────────────────────────────
-// chrome.storage.local["liAuth"] = { email, name, token, signedInAt }.
-// One session, shared by everything: the popup gates its tabs on it, content.js
-// gates the score panels and ✨ AI on linkedin.com, and signing out anywhere is
-// seen everywhere through chrome.storage.onChanged. The password is never stored.
+// The extension signs in to the admin with a personal extension key (Admin → your
+// name → Account & extension keys). The admin decides who that is: each user has
+// their own workspace there, and the key only ever reaches that user's data.
+//
+// chrome.storage.local["liAuth"] = { v, email, name, signedInAt } - who is signed in.
+//   Read everywhere: the popup gates its tabs on it, content.js gates the panels on
+//   linkedin.com, and signing out anywhere is seen everywhere through onChanged.
+// chrome.storage.local["liAuthKey"] = the key itself. Read only by the background
+//   worker and the popup, never by content.js, so it never sits in a LinkedIn tab.
+// chrome.storage.local["liOwner"] = whose leads are stored in this browser, so signing
+//   in as someone else clears them first and a sync can never hand one user's leads
+//   to another.
 const LI_AUTH_KEY = "liAuth";
+const LI_AUTH_TOKEN_KEY = "liAuthKey";
+const LI_OWNER_KEY = "liOwner";
+// Sessions from before real sign-in (a local stand-in token) are not valid any more.
+const LI_AUTH_VERSION = 2;
 
-const liAuthValid = (auth) => !!(auth && auth.token && auth.email);
+const liAuthValid = (auth) => !!(auth && auth.v === LI_AUTH_VERSION && auth.email);
 
 function liGetAuth(cb) {
   try { chrome.storage.local.get([LI_AUTH_KEY], (r) => cb((r && r[LI_AUTH_KEY]) || null)); }
   catch (e) { cb(null); }
 }
 
-const liEmailLooksReal = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(email || "").trim());
+function liGetAuthToken() {
+  return new Promise((res) => {
+    try { chrome.storage.local.get([LI_AUTH_TOKEN_KEY], (r) => res((r && r[LI_AUTH_TOKEN_KEY]) || "")); }
+    catch (e) { res(""); }
+  });
+}
 
-// "harsh.patel@acme.com" → "Harsh Patel", so the popup can greet someone by name
-// before the backend has a name field to send.
+// "harsh.patel@acme.com" -> "Harsh Patel", for an account with no name set yet.
 function liNameFromEmail(email) {
   return String(email || "").split("@")[0].split(/[._-]+/).filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
-// ── The one function to replace when the backend grows accounts ───────────────
-// Everything else — the form, the gate, the session, the sign-out — is already
-// built against a real answer. This stub only checks that the credentials are
-// filled in and well-formed; it does NOT verify anyone, so treat the gate as a
-// lock on this browser, not as security.
-//
-// To go live, replace the body with the request and change nothing else. It must
-// resolve to { email, name, token } or throw an Error whose message is shown on
-// the form (so write it for the person reading it, not for a log):
-//
-//   const resp = await fetch(base + "/auth/login", {
-//     method: "POST", headers: { "Content-Type": "application/json" },
-//     body: JSON.stringify({ email, password }),
-//   });
-//   const data = await resp.json().catch(() => ({}));
-//   if (resp.status === 401) throw new Error("That email and password don't match. Check both and try again.");
-//   if (!resp.ok) throw new Error(data.detail || "Sign-in is unavailable right now — try again in a moment.");
-//   return { email: data.email, name: data.name || liNameFromEmail(data.email), token: data.token };
-async function liRequestSignIn(email, password) {
-  email = String(email || "").trim();
-  password = String(password || "");
-  if (!email) throw new Error("Enter the email you use for this extension.");
-  if (!liEmailLooksReal(email)) throw new Error("That email doesn't look right — check for a typo.");
-  if (!password) throw new Error("Enter your password.");
-  if (password.length < 6) throw new Error("Passwords are at least 6 characters.");
-  return { email, name: liNameFromEmail(email), token: "local-" + Date.now().toString(36) };
+const liStore = {
+  get: (keys) => new Promise((res) => chrome.storage.local.get(keys, (r) => res(r || {}))),
+  set: (items) => new Promise((res) => chrome.storage.local.set(items, res)),
+  remove: (keys) => new Promise((res) => chrome.storage.local.remove(keys, res)),
+};
+
+// Asks the admin who this key belongs to. Resolves to { email, name, token, base } or
+// throws an Error written for the person reading the form.
+async function liRequestSignIn(key, adminUrl) {
+  key = String(key || "").trim();
+  if (!key) throw new Error("Paste your extension key.");
+  if (!/^la_[A-Za-z0-9_-]{20,}$/.test(key)) {
+    throw new Error("That doesn't look like an extension key. Keys start with la_ - copy it again from the admin.");
+  }
+  const cleanUrl = liCleanApiBase(adminUrl);
+  if (String(adminUrl || "").trim() && !cleanUrl) throw new Error("The admin address isn't a URL.");
+  const base = cleanUrl || LI_ADMIN_DEFAULT;
+  let resp;
+  try {
+    resp = await fetch(base + "/auth/me", { headers: { Authorization: "Bearer " + key } });
+  } catch (e) {
+    throw new Error("Can't reach the admin at " + base + ". Check the address and that it is running.");
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (resp.status === 401) throw new Error("That key isn't valid or was revoked. Create a new one in the admin under Account.");
+  if (!resp.ok || !data.user) throw new Error(data.detail || "The admin answered " + resp.status + ". Try again in a moment.");
+  return { email: data.user.email, name: data.user.name || liNameFromEmail(data.user.email), token: key, base: cleanUrl };
+}
+
+// Everything in this browser that belongs to one user: the lead log, every saved
+// score, typed form value and draft, and their ICP / pitch choices. Device settings
+// (analyzer and admin addresses, follow-up days, developer keys) stay.
+async function liWipeUserData() {
+  const all = await liStore.get(null);
+  const keys = Object.keys(all).filter((k) => k === LI_LEADS_KEY || /^(liScore|liActForm|liOutreach):/.test(k));
+  if (keys.length) await liStore.remove(keys);
+  const settings = Object.assign({}, all[LI_SETTINGS_KEY] || {});
+  for (const k of ["icpId", "senderRole", "aiSetupDone"]) delete settings[k];
+  await liStore.set({ [LI_SETTINGS_KEY]: settings });
 }
 
 // Runs the sign-in and, only if it succeeds, saves the session. Resolves with it.
-function liSignIn(email, password) {
-  return liRequestSignIn(email, password).then((session) => new Promise((resolve) => {
-    const auth = Object.assign({ signedInAt: Date.now() }, session);
-    chrome.storage.local.set({ [LI_AUTH_KEY]: auth }, () => resolve(auth));
-  }));
+async function liSignIn(key, adminUrl) {
+  const s = await liRequestSignIn(key, adminUrl);
+  const r = await liStore.get([LI_OWNER_KEY, LI_SETTINGS_KEY]);
+  if (r[LI_OWNER_KEY] && r[LI_OWNER_KEY] !== s.email) await liWipeUserData();
+  const settings = Object.assign({}, (await liStore.get([LI_SETTINGS_KEY]))[LI_SETTINGS_KEY] || {});
+  if (s.base) settings.adminBase = s.base;
+  // The key goes in before the session, so nothing sees "signed in" without a key.
+  await liStore.set({ [LI_AUTH_TOKEN_KEY]: s.token, [LI_OWNER_KEY]: s.email, [LI_SETTINGS_KEY]: settings });
+  const auth = { v: LI_AUTH_VERSION, email: s.email, name: s.name, signedInAt: Date.now() };
+  await liStore.set({ [LI_AUTH_KEY]: auth });
+  return auth;
 }
 
-// Leads, scores and settings survive: signing out locks the extension, it does
-// not throw away the work.
+// Signing out forgets the key; leads and scores stay for when the same person signs
+// back in (signing in as someone else clears them).
 function liSignOut(cb) {
-  chrome.storage.local.remove(LI_AUTH_KEY, () => cb && cb());
+  chrome.storage.local.remove([LI_AUTH_KEY, LI_AUTH_TOKEN_KEY], () => cb && cb());
+}
+
+// ─── Shared helpers (popup, background worker and content scripts all load this) ──
+// Text made safe for HTML, inside an element or an attribute.
+function liEsc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// What the analyzer writes for a value it didn't find. Shown as nothing, never as text.
+const LI_NA_RE = /^(not specified|unknown|no activity data|no recent activity|no projects)$/i;
+function liClean(v) {
+  const s = String(v == null ? "" : v).trim();
+  return s && !LI_NA_RE.test(s) ? s : "";
+}
+
+// How long each kind of call may take, in ms. Apify scrapes and AI are slow, and a
+// sleeping Render server adds ~30-50 s, so the long ones are generous.
+const LI_TIMEOUTS = {
+  analyzer: 45000,        // any analyzer call without its own entry
+  analyzerMax: 170000,
+  analyze: 150000,        // Activity score: profile + posts from Apify
+  suggest: 100000,        // ✨ suggestions
+  admin: 15000,           // any admin call without its own entry
+  adminMax: 240000,
+  adminAnalyze: 220000,   // ICP score: the admin collects through the analyzer first
+  saveRules: 30000,       // publishing a new ICP version
+  check: 12000,           // the popup's "is it reachable" checks
+  workerGrace: 8000,      // extra wait for the background worker itself to answer
+};
+
+// One message to the background worker; resolves with its answer, or null when the
+// extension was reloaded or the worker didn't answer.
+function liAsk(msg) {
+  return new Promise((resolve) => {
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) return resolve(null);
+      chrome.runtime.sendMessage(msg, (res) => {
+        void chrome.runtime.lastError;
+        resolve(res || null);
+      });
+    } catch (e) { resolve(null); }
+  });
 }

@@ -46,6 +46,8 @@
   button.btn.primary { background: var(--purple); border-color: var(--purple); color: var(--on-purple); }
   button.btn.primary:hover { color: var(--on-purple); filter: brightness(1.08); }
   button.btn.danger:hover { border-color: var(--bad); color: var(--bad); }
+  /* Icon-only buttons (the lead card's delete) keep a square, finger-sized target. */
+  button.btn.icon { padding: 0; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; margin-left: auto; }
   button.btn:disabled, button.btn:disabled:hover { opacity: .5; cursor: default; border-color: var(--border); color: var(--fg-2); filter: none; }
   label { display: block; font-weight: 700; font-size: 12px; margin: 10px 0 3px; color: var(--fg-2); }
   label span { font-weight: 400; color: var(--muted); }
@@ -85,6 +87,7 @@
                 border-radius: 6px; background: color-mix(in srgb, var(--bad) 8%, transparent);
                 color: var(--fg); font-size: 12px; line-height: 1.45; }
   .gate-error[hidden] { display: none; }
+  .gate-hint { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
   .gate-error svg { flex-shrink: 0; margin-top: 1px; color: var(--bad); }
   .gate-submit { width: 100%; margin-top: 18px; padding: 10px; font-size: 13px; }
   .gate-note { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--border);
@@ -111,17 +114,18 @@
   <section class="gate" id="auth-gate" hidden>
     <form id="signin-form" novalidate>
       <h1 class="gate-title">LinkedIn <span>AI</span> Analyzer</h1>
-      <p class="gate-sub">Sign in to score profiles, log leads and write AI notes while you work on LinkedIn.</p>
+      <p class="gate-sub">Sign in with your extension key to score profiles, log leads and write AI notes while you work on LinkedIn.</p>
 
-      <label for="signin-email">Email</label>
-      <input id="signin-email" type="email" autocomplete="username" autocapitalize="off"
-             spellcheck="false" placeholder="you@company.com">
-
-      <label for="signin-password">Password</label>
+      <label for="signin-key">Extension key</label>
       <div class="secret">
-        <input id="signin-password" type="password" autocomplete="current-password" placeholder="Your password">
-        <button type="button" class="btn" id="signin-reveal" aria-pressed="false" aria-controls="signin-password">Show</button>
+        <input id="signin-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"
+               placeholder="la_…" aria-describedby="signin-key-hint">
+        <button type="button" class="btn" id="signin-reveal" aria-pressed="false" aria-controls="signin-key">Show</button>
       </div>
+      <p class="gate-hint" id="signin-key-hint">In the admin: your name (bottom left) → Account &amp; extension keys → Create key.</p>
+
+      <label for="signin-admin">Admin address</label>
+      <input id="signin-admin" type="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:8001/api">
 
       <p class="gate-error" id="signin-error" role="alert" hidden>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 5v3.6M8 11h.01"/></svg>
@@ -130,8 +134,8 @@
 
       <button type="submit" class="btn primary gate-submit" id="signin-submit">Sign in</button>
 
-      <p class="gate-note">Accounts are not on the server yet, so this unlocks the extension on this
-        browser rather than checking your password. Leads and scores stay on this machine.</p>
+      <p class="gate-note">Only people your admin has added can sign in. Everything you score goes to your own
+        workspace; signing in as someone else clears this browser's leads first.</p>
     </form>
   </section>
 
@@ -212,6 +216,16 @@
         <div class="row" style="justify-content:flex-end;margin:8px 0 0;">
           <button type="button" class="btn danger" id="apify-clear">Clear</button>
           <button type="button" class="btn primary" id="apify-save">Save token</button>
+        </div>
+        <label for="server-key">ANALYZER_API_KEY <span>needed when the backend is on Render</span></label>
+        <div class="secret">
+          <input id="server-key" type="password" autocomplete="off" spellcheck="false" placeholder="the key set on the server">
+          <button type="button" class="btn" id="server-key-reveal" aria-pressed="false" aria-controls="server-key">Show</button>
+        </div>
+        <div class="muted saved-token" id="server-key-saved"></div>
+        <div class="row" style="justify-content:flex-end;margin:8px 0 0;">
+          <button type="button" class="btn danger" id="server-key-clear">Clear</button>
+          <button type="button" class="btn primary" id="server-key-save">Save key</button>
         </div>
         <div class="status" id="dev-status" role="status" style="margin-top:6px;"></div>
       </div>

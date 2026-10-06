@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -6,9 +7,12 @@ import urllib.error
 import urllib.request
 
 from services.actor_service import run_posts_actor
+from services.config import BASE_DIR, settings
 from services.config_store import read_config, write_config
 from services.matching import find_phrase, normalize
 from services.scoring_service import parse_activity_to_days, split_own_posts
+
+log = logging.getLogger(__name__)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -17,15 +21,16 @@ MESSAGE_CHAR_CAP    = 600    # one message in the transcript
 TRANSCRIPT_CHAR_CAP = 5000   # whole transcript — oldest messages drop first
 SUGGESTION_MAX  = 3
 MAX_CHARS       = 300   # default cap; invite notes send LinkedIn's own limit
-OUTREACH_NOTE_MAX    = 300   # LinkedIn's connection-note limit
-OUTREACH_MESSAGE_MAX = 700
 POSTS_FOR_PAIN  = 5     # recent posts read to find the pro opener's pain point
 POSTS_CACHE_TTL = 6 * 3600
+# ICP fit, as every prompt and template talks about it: strong from 70, weak below 40
+# (the same bands the extension colours the ICP score with).
+STRONG_FIT = 70
+WEAK_FIT   = 40
 
 # ─── Pitch: who "I" am in every message ───────────────────────────────────────
 # Edited from the extension toolbar popup (Settings) and stored in
-# pitch_config.json next to main.py — same pattern as icp_config.json.
-BASE_DIR          = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# pitch_config.json next to main.py (services/config_store.py).
 PITCH_CONFIG_FILE = os.path.join(BASE_DIR, "pitch_config.json")
 
 DEFAULT_PITCH = {
@@ -70,7 +75,7 @@ def _plain_role(value) -> str:
 
 def _models() -> list[str]:
     """OPENROUTER_MODEL may list fallbacks: "primary,backup,openrouter/free"."""
-    raw = os.getenv("OPENROUTER_MODEL") or "openrouter/free"
+    raw = settings.openrouter_model
     return [m.strip() for m in raw.split(",") if m.strip()][:3]
 
 
@@ -171,9 +176,9 @@ def _fit_rule(lead: dict) -> str:
         bits.append(f"ICP fit {icp}/100")
     if act is not None:
         bits.append(f"LinkedIn activity {act}/100" + (f" ({lead['activity_label']})" if lead.get("activity_label") else ""))
-    if icp is not None and icp >= 70:
+    if icp is not None and icp >= STRONG_FIT:
         how = "Strong fit: be confident and direct — a clear ask for a short 15-minute call is fine."
-    elif icp is not None and icp < 40:
+    elif icp is not None and icp < WEAK_FIT:
         how = "Weak fit: build the relationship only — no pitch and no call request."
     else:
         how = "Medium fit: lead with value and end with a soft, low-pressure question."
@@ -362,12 +367,6 @@ def _json_object(content: str):
     return data if isinstance(data, dict) else None
 
 
-def _parse_reply(content: str, max_chars: int = MAX_CHARS) -> tuple[list[str], str]:
-    """-> (suggestions, pain_point)"""
-    suggestions, pain, _, _meta = _parse_reply_full(content, max_chars)
-    return suggestions, pain
-
-
 def _parse_reply_full(content: str, max_chars: int = MAX_CHARS) -> tuple[list[str], str, str, dict]:
     """-> (suggestions, pain_point, analysis, meta)
 
@@ -375,8 +374,7 @@ def _parse_reply_full(content: str, max_chars: int = MAX_CHARS) -> tuple[list[st
     (intent), the register to answer in (tone) and whether a question of
     ours is still open (needs_follow_up). Absent keys simply stay empty.
     """
-    text = (content or "").strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I).strip()
+    text = _strip_fences(content)
     items: list = []
     pain = analysis = ""
     meta: dict = {}
@@ -421,10 +419,6 @@ def _fit_length(s: str, max_chars: int) -> str:
     return cut[:cut.rfind(" ")].rstrip(",;:—- ") if " " in cut else cut
 
 
-def _parse_suggestions(content: str) -> list[str]:
-    return _parse_reply(content)[0]
-
-
 def generate_chat_suggestions(messages: list[dict], tone: str, first_name: str, profile: dict,
                               profile_url: str = "", *, draft: str = "", action: str = "",
                               lead: dict | None = None, context: str = "chat",
@@ -440,7 +434,7 @@ def generate_chat_suggestions(messages: list[dict], tone: str, first_name: str, 
             req["sender_role"] = sender_role
         return generate_invite_notes(req, tone, max_chars, profile_url)
     if not _providers():
-        raise Exception("No AI key set — add GROQ_API_KEY (or OPENROUTER_API_KEY) to .env and restart the server")
+        raise AIUnavailable(NO_AI_KEY)
     tone = "pro" if tone == "pro" else "casual"
     first = first_name or "them"
     lead = lead or {}
@@ -464,20 +458,9 @@ def generate_chat_suggestions(messages: list[dict], tone: str, first_name: str, 
         pain_source = "recent posts" if posts else ("profile" if any(profile.values()) else "")
         mode, prompt = "opener", _pro_opener_prompt(pitch, first, profile, posts, lead, max_chars, invite)
 
-    # Providers are tried in order (Groq → OpenRouter). Quick failures — rate
-    # limits, overload, or a router pick that ignores the format (a guard model
-    # answering "User Safety: safe") — are retried a few times before giving up.
-    last_error = "AI returned no usable suggestions — try again"
-    deadline = time.time() + CHAT_BUDGET_S
-    for attempt in range(4):
-        if time.time() > deadline - 5:
-            break
-        try:
-            content = _call_ai(prompt, deadline)
-        except TransientAIError as e:
-            last_error = str(e)
-            time.sleep(min(1 + attempt, max(0.0, deadline - time.time() - 5)))
-            continue
+    # Providers are tried in order (Groq → OpenRouter); a reply that isn't usable (a guard
+    # model answering "User Safety: safe", too few suggestions) is asked for again.
+    def accept(content):
         suggestions, pain, analysis, meta = _parse_reply_full(content, max_chars)
         if len(suggestions) >= 2 or (mode == "rewrite" and suggestions):
             return {
@@ -491,19 +474,59 @@ def generate_chat_suggestions(messages: list[dict], tone: str, first_name: str, 
                 "intent":           meta.get("intent", "") if mode == "reply" else "",
                 "reply_tone":       meta.get("tone", "") if mode == "reply" else "",
                 "needs_follow_up":  meta.get("needs_follow_up") if mode == "reply" else None,
-            }
-    raise Exception(last_error)
+            }, None
+        return None, None
+
+    result, problem = _ask_ai(prompt, CHAT_BUDGET_S, 4, accept)
+    if result is None:
+        raise AIUnavailable(problem or "AI returned no usable suggestions — try again")
+    return result
 
 
 # The extension gives up after 100s (chat) / 90s (outreach) and a sleeping Render
 # server eats part of that, so the server stops retrying well before.
 AI_REQUEST_TIMEOUT = 40
 CHAT_BUDGET_S = 75
-OUTREACH_BUDGET_S = 40
+MESSAGE_BUDGET_S = 40      # the admin's lead message
 
 
 class TransientAIError(Exception):
     """Rate limit / overload / network blip — worth another try."""
+
+
+class AIUnavailable(Exception):
+    """No AI could produce a usable answer. The message is safe to show the user."""
+
+
+def _ask_ai(prompt: list[dict], budget_s: float, attempts: int, accept, *, give_up_on_error: bool = False):
+    """Ask until `accept(content)` returns a result, within `budget_s` seconds and `attempts` tries.
+
+    `accept` returns (result, None) to finish or (None, why) to try again. Quick failures -
+    rate limits, overload, a router pick that ignores the format - are retried with a short
+    back-off. Returns (result, None) or (None, the last reason). A non-transient error is
+    raised, unless `give_up_on_error`, which returns it as the reason instead."""
+    deadline = time.time() + budget_s
+    problem = None
+    for attempt in range(attempts):
+        if time.time() > deadline - 5:
+            problem = problem or "the AI took too long"
+            break
+        try:
+            content = _call_ai(prompt, deadline)
+        except TransientAIError as e:
+            problem = str(e)
+            time.sleep(min(1 + attempt, max(0.0, deadline - time.time() - 5)))
+            continue
+        except Exception as e:
+            if not give_up_on_error:
+                raise
+            problem = str(e)
+            break
+        result, why = accept(content)
+        if result is not None:
+            return result, None
+        problem = why or problem
+    return None, problem
 
 
 class QuotaExhausted(Exception):
@@ -522,19 +545,22 @@ _exhausted: dict = {}          # provider name -> when its daily quota ran out
 EXHAUSTED_RECHECK = 3600       # try an exhausted provider again after an hour
 
 
+NO_AI_KEY = "No AI key set — add GROQ_API_KEY (or OPENROUTER_API_KEY) to .env and restart the server"
+
+
 def _providers() -> list[dict]:
     out = []
-    if os.getenv("GROQ_API_KEY"):
-        out.append({"name": "Groq", "url": GROQ_URL, "key": os.getenv("GROQ_API_KEY")})
-    if os.getenv("OPENROUTER_API_KEY"):
-        out.append({"name": "OpenRouter", "url": OPENROUTER_URL, "key": os.getenv("OPENROUTER_API_KEY")})
+    if settings.groq_api_key:
+        out.append({"name": "Groq", "url": GROQ_URL, "key": settings.groq_api_key})
+    if settings.openrouter_api_key:
+        out.append({"name": "OpenRouter", "url": OPENROUTER_URL, "key": settings.openrouter_api_key})
     return out
 
 
 def _groq_model(key: str) -> str:
     """GROQ_MODEL from .env, else the best chat model Groq currently offers."""
-    if os.getenv("GROQ_MODEL"):
-        return os.getenv("GROQ_MODEL")
+    if settings.groq_model:
+        return settings.groq_model
     if "id" in _groq_model_cache:
         return _groq_model_cache["id"]
     req = urllib.request.Request(GROQ_MODELS_URL, headers={"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT})
@@ -552,7 +578,7 @@ def _groq_model(key: str) -> str:
         if pick:
             break
     _groq_model_cache["id"] = pick or (chat[0] if chat else "llama-3.3-70b-versatile")
-    print(f"[LI-AI] Groq model: {_groq_model_cache['id']}")
+    log.info("Groq model: %s", _groq_model_cache["id"])
     return _groq_model_cache["id"]
 
 
@@ -561,7 +587,7 @@ def _call_ai(prompt: list[dict], deadline: float | None = None) -> str:
     `deadline` (a time.time() value) caps the whole call so the caller can still answer in time."""
     providers = _providers()
     if not providers:
-        raise Exception("No AI key set — add GROQ_API_KEY (or OPENROUTER_API_KEY) to .env and restart the server")
+        raise AIUnavailable(NO_AI_KEY)
     errors, transient = [], False
     for p in providers:
         spent = _exhausted.get(p["name"])
@@ -583,7 +609,7 @@ def _call_ai(prompt: list[dict], deadline: float | None = None) -> str:
             errors.append(str(e))
         except Exception as e:
             errors.append(str(e))
-    if all("daily limit" in e for e in errors) and not os.getenv("GROQ_API_KEY"):
+    if all("daily limit" in e for e in errors) and not settings.groq_api_key:
         errors.append("add a free GROQ_API_KEY to .env")
     raise (TransientAIError if transient else Exception)(" | ".join(errors))
 
@@ -592,10 +618,10 @@ def _post_chat(p: dict, prompt: list[dict], timeout: float = 40) -> str:
     name = p["name"]
     headers = {"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json", "User-Agent": USER_AGENT}
     if name == "Groq":
-        payload = {"model": _groq_model(p["key"]), "messages": prompt, "temperature": 0.8}
+        payload = {"model": _groq_model(p["key"]), "messages": prompt, "temperature": settings.ai_temperature}
     else:
         models = _models()
-        payload = {"model": models[0], "messages": prompt, "temperature": 0.8}
+        payload = {"model": models[0], "messages": prompt, "temperature": settings.ai_temperature}
         if len(models) > 1:
             payload["models"] = models      # OpenRouter falls back down this list
         headers["X-Title"] = "LinkedIn AI Analyzer"
@@ -626,7 +652,7 @@ def _post_chat(p: dict, prompt: list[dict], timeout: float = 40) -> str:
         return ""
 
 
-# ─── Outreach: connection note + first message from the ICP / Activity analysis ─
+# ─── What we know about the person, cleaned for prompts and templates ─────────
 _EMPTY_VALUES = ("not specified", "unknown", "no activity data", "no recent activity", "none", "n/a")
 
 
@@ -683,9 +709,9 @@ def _outreach_angle(ctx: dict) -> str:
     parts = []
     icp = ctx["icp"]
     if icp is not None:
-        if icp >= 70:
+        if icp >= STRONG_FIT:
             parts.append(f"Strong ICP fit ({icp}/100)")
-        elif icp >= 40:
+        elif icp >= WEAK_FIT:
             parts.append(f"Partial ICP fit ({icp}/100)")
         else:
             parts.append(f"Weak ICP fit ({icp}/100) — build the relationship, no pitch yet")
@@ -703,52 +729,12 @@ def _outreach_angle(ctx: dict) -> str:
         parts.append("active recently — open with their latest post")
     elif days is not None and days <= 30:
         parts.append("active on LinkedIn in the last month")
-    elif ctx["act"] is not None and ctx["act"] < 40:
+    elif ctx["act"] is not None and ctx["act"] < WEAK_FIT:
         parts.append("rarely active on LinkedIn — keep the note short and personal")
     if not parts:
         return "Not much to go on yet — keep the first note short, personal and pitch-free."
     angle = "; ".join(parts[:3])
     return angle[0].upper() + angle[1:] + "."
-
-
-def _outreach_template(ctx: dict, pitch: dict, tone: str, notice: str = "") -> dict:
-    first = ctx["first"] or "there"
-    pro = tone == "pro"
-    if ctx["snippet"]:
-        verb = "read" if pro else "enjoyed"
-        hook = f'I {verb} your recent post on "{_short_topic(ctx["snippet"])}"'
-    elif ctx["position"] and ctx["company"]:
-        hook = f"I came across your work as {ctx['position']} at {ctx['company']}"
-    elif ctx["position"]:
-        hook = f"I came across your work as {ctx['position']}"
-    elif ctx["headline"]:
-        hook = f"I came across your profile ({_plain(ctx['headline'], 90)})"
-    else:
-        hook = "I came across your profile"
-    weak = ctx["icp"] is not None and ctx["icp"] < 40
-    expertise = _plain(pitch.get("expertise"), 80)
-    intro = "" if weak or not expertise else f" We're {expertise}."
-    close = " I'd welcome the chance to connect." if pro else " Would be great to connect!"
-    note = _fit_length(f"Hi {first}, {hook}.{intro}{close}", OUTREACH_NOTE_MAX)
-
-    opener = _plain(pitch.get("casual_opener"), 260) or _plain(pitch.get("offer"), 200)
-    icp = ctx["icp"]
-    if weak:
-        ask = "No agenda — just happy to be connected and to swap ideas anytime."
-        opener = ""
-    elif icp is not None and icp >= 70:
-        ask = "Would you be open to a quick 15-minute call next week to see if there's a fit?"
-    else:
-        ask = "Would it help if I shared a couple of ideas for your team?"
-    thanks = f"Thank you for connecting, {first}." if pro else f"Thanks for connecting, {first}!"
-    ref = ""
-    if ctx["snippet"]:
-        ref = f' Your post on "{_short_topic(ctx["snippet"], 6)}" stood out.'
-    elif ctx["company"]:
-        ref = f" Great to see what you're building at {ctx['company']}."
-    message = _fit_length(" ".join(x for x in (thanks + ref, opener, ask) if x), OUTREACH_MESSAGE_MAX)
-    return {"angle": _outreach_angle(ctx), "connection_note": note, "message": message,
-            "source": "template", "notice": notice}
 
 
 def _analysis_block(ctx: dict) -> str:
@@ -771,86 +757,6 @@ def _analysis_block(ctx: dict) -> str:
     if ctx["prior"]:
         lines.append(f"Previous contact with them: {ctx['prior']}")
     return "Analysis:\n" + ("\n".join(lines) or "(no scores yet)")
-
-
-def _outreach_prompt(ctx: dict, pitch: dict, tone: str) -> list[dict]:
-    first = ctx["first"] or "there"
-    lead = {"icp_score": ctx["icp"], "activity_score": ctx["act"], "activity_label": ctx["act_label"]}
-    system = (
-        _persona(pitch) +
-        "You write a LinkedIn connection-request note and the first message to send after they accept.\n"
-        f"{TONE_RULES[tone]}\n"
-        "Rules:\n"
-        "- angle: one short sentence — why this person is worth contacting now and how to approach them, "
-        "based only on the analysis.\n"
-        f"- connection_note: under {OUTREACH_NOTE_MAX} characters, greets {first}, mentions ONE concrete detail "
-        "from the analysis (their recent post topic, role, company, or a hiring/growth signal), no hard sell.\n"
-        f"- message: under {OUTREACH_MESSAGE_MAX} characters, sent after they accept: thank them, link that detail "
-        "to how we can help, end with an ask that matches the fit.\n"
-        + (_fit_rule(lead) or "- End the message with a soft, low-pressure question.\n")
-        + "- Use only facts from the profile or analysis; leave out anything unknown.\n"
-        + LANGUAGE_RULE_OPENER + COMMON_RULES +
-        'Return ONLY JSON: {"angle": "...", "connection_note": "...", "message": "..."}'
-    )
-    profile = {"name": ctx["name"], "headline": ctx["headline"], "position": ctx["position"],
-               "current_company": ctx["company"], "location": ctx["country"], "about": ctx["about"]}
-    user = f"{_profile_block(profile)}\n\n{_analysis_block(ctx)}"
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
-
-
-def _parse_outreach(content: str):
-    data = _json_object(content)
-    if not data:
-        return None
-    note = _plain(data.get("connection_note")).strip('"')
-    message = _plain(data.get("message")).strip('"')
-    if len(note) < 15 or len(message) < 15 or re.search(r"\[[A-Za-z ]+\]", note + message):
-        return None   # too short, or placeholders like [Name] left in
-    return {
-        "angle": _plain(data.get("angle"), 240),
-        "connection_note": _fit_length(note, OUTREACH_NOTE_MAX),
-        "message": _fit_length(message, OUTREACH_MESSAGE_MAX),
-    }
-
-
-def generate_outreach(req: dict) -> dict:
-    """-> {"angle", "connection_note", "message", "source": "ai"|"template", "notice"}. Never raises for AI trouble."""
-    req = req if isinstance(req, dict) else {}
-    pitch = _pitch_for(req.get("sender_role"))
-    tone = "pro" if req.get("tone") == "pro" else "casual"
-    ctx = _outreach_context(req)
-    if not any(ctx[k] for k in ("position", "company", "headline", "snippet", "about", "hits", "breakdown")):
-        # Nothing concrete to personalise with — an AI would only invent details
-        return _outreach_template(ctx, pitch, tone,
-                                  "Not enough profile details for a personalised AI note — calculate the ICP or "
-                                  "Activity score first. This is a template.")
-    if not _providers():
-        return _outreach_template(ctx, pitch, tone,
-                                  "AI is not set up (no GROQ_API_KEY / OPENROUTER_API_KEY) — this is a template "
-                                  "built from the analysis.")
-    prompt = _outreach_prompt(ctx, pitch, tone)
-    problem = "the AI reply could not be read"
-    deadline = time.time() + OUTREACH_BUDGET_S
-    for attempt in range(3):
-        if time.time() > deadline - 5:
-            problem = "the AI took too long" if attempt == 0 else problem
-            break
-        try:
-            content = _call_ai(prompt, deadline)
-        except TransientAIError as e:
-            problem = str(e)
-            time.sleep(min(0.5 * (attempt + 1), max(0.0, deadline - time.time() - 5)))
-            continue
-        except Exception as e:
-            problem = str(e)
-            break
-        parsed = _parse_outreach(content)
-        if parsed:
-            if not parsed["angle"]:
-                parsed["angle"] = _outreach_angle(ctx)
-            return {**parsed, "source": "ai", "notice": ""}
-    return _outreach_template(ctx, pitch, tone,
-                              f"AI unavailable ({_plain(problem, 140)}) — this is a template built from the analysis.")
 
 
 # ─── Connect → "Add a note": notes written for THIS person ────────────────────
@@ -887,9 +793,9 @@ def _is_personal(note: str, tokens: list) -> bool:
 def _note_fit_hint(icp) -> str:
     if icp is None:
         return "- Keep any mention of what we do to a few words.\n"
-    if icp >= 70:
+    if icp >= STRONG_FIT:
         return f"- Strong ICP fit ({icp}/100): you may say in a few words how we help people like them.\n"
-    if icp < 40:
+    if icp < WEAK_FIT:
         return f"- Weak ICP fit ({icp}/100): relationship only — do not mention our services.\n"
     return f"- Partial ICP fit ({icp}/100): at most a light hint of what we do.\n"
 
@@ -949,7 +855,7 @@ def _invite_templates(ctx: dict, pitch: dict, tone: str, max_chars: int) -> list
         hooks.append(f"I'm always glad to meet people working in {industry}")
     if not hooks:
         hooks.append("I came across your profile")
-    weak = ctx["icp"] is not None and ctx["icp"] < 40
+    weak = ctx["icp"] is not None and ctx["icp"] < WEAK_FIT
     expertise = _plain(pitch.get("expertise"), 60)
     if weak or not expertise:
         bridge = "I'd welcome the chance to connect." if pro else "Would be great to connect!"
@@ -983,28 +889,23 @@ def generate_invite_notes(req: dict, tone: str, max_chars: int, profile_url: str
 
     posts = recent_post_texts(profile_url) if (tone == "pro" and profile_url and not ctx["snippet"]) else []
     prompt = _invite_prompt(ctx, pitch, tone, max_chars, posts)
-    deadline = time.time() + CHAT_BUDGET_S
-    best, problem = [], "the AI reply could not be read"
-    for attempt in range(3):
-        if time.time() > deadline - 5:
-            break
-        try:
-            content = _call_ai(prompt, deadline)
-        except TransientAIError as e:
-            problem = str(e)
-            time.sleep(min(1 + attempt, max(0.0, deadline - time.time() - 5)))
-            continue
-        except Exception as e:
-            problem = str(e)
-            break
+    best: list = []
+
+    def accept(content):
+        nonlocal best
         suggestions, pain, analysis, _meta = _parse_reply_full(content, max_chars)
         personal = [n for n in suggestions if _is_personal(n, tokens)]
         if len(personal) >= 2:
             return {**result, "suggestions": personal, "analysis": analysis or angle, "source": "ai",
-                    "pain_point": pain if posts else "", "pain_source": "recent posts" if posts and pain else ""}
+                    "pain_point": pain if posts else "", "pain_source": "recent posts" if posts and pain else ""}, None
         if len(personal) > len(best):
             best = personal
-        problem = "the AI notes were not specific to this person"
+        return None, "the AI notes were not specific to this person"
+
+    done, problem = _ask_ai(prompt, CHAT_BUDGET_S, 3, accept, give_up_on_error=True)
+    if done is not None:
+        return done
+    problem = problem or "the AI reply could not be read"
     templates = [t for t in _invite_templates(ctx, pitch, tone, max_chars) if t not in best]
     return {**result, "suggestions": (best + templates)[:SUGGESTION_MAX], "source": "ai" if best else "template",
             "notice": f"AI unavailable ({_plain(problem, 120)}) — notes built from their profile."}
@@ -1118,29 +1019,23 @@ def generate_lead_message(req: dict) -> dict:
     goal = str(req.get("goal") or "").strip()
     max_chars = max(120, min(int(req.get("max_chars") or LEAD_MESSAGE_MAX), LEAD_MESSAGE_MAX))
     if not _providers():
-        raise Exception("No AI key set - add GROQ_API_KEY (or OPENROUTER_API_KEY) to .env and restart the server")
+        raise AIUnavailable(NO_AI_KEY)
 
     pitch = _pitch_for(req.get("sender_role") or "")
     prompt = _lead_message_prompt(pitch, profile, messages, goal, has_convo)
-    deadline = time.time() + OUTREACH_BUDGET_S
-    last_error = "AI returned no usable message - try again"
-    for attempt in range(3):
-        if time.time() > deadline - 5:
-            break
-        try:
-            content = _call_ai(prompt, deadline)
-        except TransientAIError as e:
-            last_error = str(e)
-            time.sleep(min(1 + attempt, max(0.0, deadline - time.time() - 5)))
-            continue
-        data = _json_object(re.sub(r"^```(?:json)?\s*|\s*```$", "", (content or "").strip(), flags=re.I))
-        if isinstance(data, dict):
-            result = _clean_lead_message(data, has_convo, max_chars)
-            message = result["suggested_message"]
-            if message and PLACEHOLDER_RE.search(message):
-                # Ask again rather than hand over a draft with a blank to fill in.
-                last_error = "AI left a placeholder in the message - try again"
-                continue
-            if message:
-                return result
-    raise Exception(last_error)
+
+    def accept(content):
+        data = _json_object(content)
+        if not isinstance(data, dict):
+            return None, None
+        result = _clean_lead_message(data, has_convo, max_chars)
+        message = result["suggested_message"]
+        if message and PLACEHOLDER_RE.search(message):
+            # Ask again rather than hand over a draft with a blank to fill in.
+            return None, "AI left a placeholder in the message - try again"
+        return (result, None) if message else (None, None)
+
+    result, problem = _ask_ai(prompt, MESSAGE_BUDGET_S, 3, accept)
+    if result is None:
+        raise AIUnavailable(problem or "AI returned no usable message - try again")
+    return result

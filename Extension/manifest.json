@@ -25,9 +25,29 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.linkedin.com/*"],
-      "js": ["leads.js", "content.js"],
-      "run_at": "document_idle"
+      "matches": [
+        "https://www.linkedin.com/*"
+      ],
+      "js": [
+        "leads.js",
+        "content/scrape.js",
+        "content/helpers.js",
+        "content/backend.js",
+        "content/panel.js",
+        "content/activity.js",
+        "content/icp.js",
+        "content/auth.js",
+        "content/activity-panel.js",
+        "content/chat.js",
+        "content/invite.js",
+        "content/followups.js",
+        "content/ai-popup.js",
+        "content/init.js"
+      ],
+      "run_at": "document_idle",
+      "css": [
+        "content.css"
+      ]
     }
   ]
 }

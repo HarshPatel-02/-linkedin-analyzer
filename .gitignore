@@ -9,3 +9,11 @@ venv/
 session-notes.md
 .impeccable/
 .claude
+
+# Saved settings the server writes. pitch_config.json and activity_keywords.json stay
+# tracked on purpose: Render's disk is wiped on deploy, so the committed copy is what a
+# fresh server starts from. activity_points.json is local only.
+activity_points.json
+*.corrupt
+.tmp-*.json
+.pytest_cache/

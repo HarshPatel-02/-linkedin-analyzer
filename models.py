@@ -1,13 +1,5 @@
 from typing import Optional
-from pydantic import BaseModel, field_validator
-
-# Keyword lists edited through the "ICP Score" form in the extension
-ICP_LIST_FIELDS = [
-    "EXACT_INDUSTRIES", "RELATED_INDUSTRIES",
-    "TIER_1_TITLES", "TIER_2_TITLES", "TIER_3_TITLES",
-    "EXACT_COMPANY_SIZE_KEYWORDS", "NEARBY_COMPANY_SIZE_KEYWORDS",
-    "PRIMARY_GEOGRAPHIES", "SECONDARY_GEOGRAPHIES", "ALL_ICP_KEYWORDS",
-]
+from pydantic import BaseModel
 
 class AnalyzeRequest(BaseModel):
     profile_url:       str = ""
@@ -33,9 +25,11 @@ class AnalyzeRequest(BaseModel):
     avg_reposts:       float = 0.0
     followers:         int = 0
     connections:       int = 0
-    mutual_connections: int = 0
     profileUrl:        str = ""
     timestamp:         str = ""
+    # The signed-in user's own Activity scoring (from the admin). Absent = the saved defaults.
+    activity_points:   Optional[dict] = None
+    activity_keywords: Optional[dict] = None
 
 class ProfileData(BaseModel):
     avatar:             str   = ""
@@ -55,7 +49,6 @@ class ProfileData(BaseModel):
     activity_date:      str   = ""   # ISO date of the newest activity — the extension recomputes "X ago" from it
     followers:          int   = 0
     connections:        int   = 0
-    mutual_connections: int   = 0
     profileUrl:         str   = ""
     timestamp:          str   = ""
     score_total:        int   = 0
@@ -65,7 +58,6 @@ class ProfileData(BaseModel):
     score_engagement:   int   = 0
     score_completeness: int   = 0
     score_signals:      int   = 0
-    score_mutuals:      int   = 0
     avg_engagement:     float = 0.0
     posts_30_days:      int   = 0
     posts_90_days:      int   = 0
@@ -79,49 +71,14 @@ class ProfileData(BaseModel):
     max_posts:          int   = 20
     max_engagement:     int   = 20
     max_completeness:   int   = 10
-    max_signals:        int   = 10
-    max_mutuals:        int   = 10
+    max_signals:        int   = 20
     score_raw:          int   = 0
     score_max:          int   = 100
-    # A requirement that was not met caps score_total; these say which and from what
-    mutual_min:         int       = 0    # required mutual connections; 0 = none
-    score_uncapped:     int       = 0    # score_total before a failed requirement capped it
-    failed_required:    list[str] = []   # e.g. ["2+ mutual connections (has 0)"]
     # What the score was based on (shown in the panel, used for outreach suggestions)
     signal_hits:          dict      = {}   # {"hiring": "we're hiring", ...} — lists that matched
     completeness_missing: list[str] = []   # e.g. ["about", "skills"]
     posts_analyzed:       int       = 0
     data_source:          str       = ""   # "apify" | "form"
-
-class IcpConfig(BaseModel):
-    """ICP keywords saved from the extension form → icp_config.json.
-    A field left out of the request keeps its previously saved value."""
-    EXACT_INDUSTRIES:             Optional[list[str]] = None
-    RELATED_INDUSTRIES:           Optional[list[str]] = None
-    TIER_1_TITLES:                Optional[list[str]] = None
-    TIER_2_TITLES:                Optional[list[str]] = None
-    TIER_3_TITLES:                Optional[list[str]] = None
-    EXACT_COMPANY_SIZE_KEYWORDS:  Optional[list[str]] = None
-    NEARBY_COMPANY_SIZE_KEYWORDS: Optional[list[str]] = None
-    PRIMARY_GEOGRAPHIES:          Optional[list[str]] = None
-    SECONDARY_GEOGRAPHIES:        Optional[list[str]] = None
-    ALL_ICP_KEYWORDS:             Optional[list[str]] = None
-    POINTS:                       Optional[dict | str] = None   # {list: points} or "reset"
-    # {list name: [keywords switched off]} - kept in the list, left out of scoring.
-    DISABLED:                     Optional[dict] = None
-
-    @field_validator(*ICP_LIST_FIELDS, mode="before")
-    @classmethod
-    def _keyword_list(cls, v):
-        """Accept a list, or a string split on newlines (or commas)."""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            v = v.splitlines() if "\n" in v else v.split(",")
-        if not isinstance(v, list):
-            return None
-        return [str(x).strip() for x in v if str(x).strip()]
-
 
 class ChatMessage(BaseModel):
     sender: str = ""   # "me" | "them" | "unknown"
@@ -159,29 +116,6 @@ class SuggestRequest(BaseModel):
     prior_contact:    str = ""   # earlier messages exchanged with them, if any
 
 
-class OutreachRequest(BaseModel):
-    """Profile + ICP / Activity analysis → a connection note and a first message."""
-    name:             str = ""
-    first_name:       str = ""
-    headline:         str = ""
-    position:         str = ""
-    current_company:  str = ""
-    country:          str = ""
-    about:            str = ""
-    activity:         str = ""   # e.g. 'Last posted 3 days ago — "post snippet…"'
-    profile_url:      str = ""
-    icp_score:        Optional[int] = None
-    icp_breakdown:    dict = {}  # {"Industry Match": {"score": 35, "max": 35, "reason": "Exact match (hospital)"}, ...}
-    activity_score:   Optional[int] = None
-    activity_label:   str = ""
-    engagement_label: str = ""
-    signal_hits:      dict = {}  # {"hiring": "we're hiring", ...}
-    tone:             str = "casual"   # "casual" | "pro"
-    sender_role:      str = ""
-    pain_point:       str = ""
-    prior_contact:    str = ""
-
-
 class LeadMessageRequest(BaseModel):
     """Admin panel: this person's profile + any conversation -> one message to send."""
     name:            str = ""
@@ -209,8 +143,11 @@ class CollectRequest(BaseModel):
     them could not be collected.
     """
     profile_url: str = ""
-    max_posts:   int = 20
+    max_posts:   Optional[int] = None   # None: settings.max_posts
     scraped:     dict = {}     # what the extension could read off the page
+    # The workspace's own Activity scoring, sent by the admin. Absent = the saved defaults.
+    activity_points:   Optional[dict] = None
+    activity_keywords: Optional[dict] = None
 
 
 class PitchConfig(BaseModel):
@@ -220,18 +157,3 @@ class PitchConfig(BaseModel):
     offer:         Optional[str] = None
     services:      Optional[str] = None
     casual_opener: Optional[str] = None
-
-
-class IcpScore(BaseModel):
-    name:               str   = ""
-    country:            str   = ""
-    position:           str   = ""
-    headline:           str   = ""
-    industry:           str   = ""
-    about:              str   = ""
-    current_company_name: str =""
-    current_company:    str   = ""
-    current_company_employee_count: str =""
-    current_company_headquarters: str ="" 
-    profile_url:        str   = ""
-    profileUrl:         str   = ""

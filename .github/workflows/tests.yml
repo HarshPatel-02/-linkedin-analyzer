@@ -1,0 +1,70 @@
+# Runs on every push and pull request: the analyzer's tests, and a check that the Chrome
+# extension loads (every script parses, and every file the manifest names exists).
+name: Tests
+
+on:
+  push:
+    branches: ["**"]   # a version tag runs them through release.yml instead
+  pull_request:
+  workflow_call:       # release.yml runs these before it deploys
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyzer:
+    name: Analyzer (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install
+        run: pip install -r requirements-dev.txt
+      - name: Test
+        # No keys are needed: the tests stand in for Apify and the AI providers.
+        run: pytest -q
+
+  extension:
+    name: Chrome extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Every script parses
+        run: |
+          for f in Extension/*.js Extension/content/*.js; do
+            node --check "$f"
+          done
+      - name: Every file the manifest names exists
+        run: |
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const dir = "Extension";
+            const m = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8"));
+            const files = [
+              m.background && m.background.service_worker,
+              m.action && m.action.default_popup,
+              ...(m.content_scripts || []).flatMap((c) => [...(c.js || []), ...(c.css || [])]),
+            ].filter(Boolean);
+            const missing = files.filter((f) => !fs.existsSync(path.join(dir, f)));
+            if (missing.length) { console.error("Missing:", missing.join(", ")); process.exit(1); }
+            console.log(`manifest v${m.manifest_version}: ${files.length} files, all present`);
+          '

@@ -1,0 +1,102 @@
+# Continuous delivery: pushing a version tag releases it.
+#
+#   (set VERSION in services/config.py, commit, push main)
+#   git tag -a v1.2.0 -m "What changed"   (on the newest commit of main)
+#   git push origin v1.2.0
+#
+# Runs every test, deploys the analyzer on Render, waits until /health reports the new
+# version, and publishes a GitHub Release with the tag's notes. The Chrome extension is
+# not deployed from here: load or publish it as before (the Release is a good place to
+# attach its zip).
+#
+# One-time setup (Settings -> Secrets and variables -> Actions):
+#   secret    RENDER_DEPLOY_HOOK   (Render -> the analyzer service -> Settings -> Deploy Hook)
+#   variable  HEALTH_URL           https://linkedin-analyzer-90ne.onrender.com/health
+# Until the secret is set, the release is published without deploying (and says so).
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write          # to publish the GitHub Release
+
+concurrency:
+  group: release           # one release at a time, never cancelled half-way
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  deploy:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production   # deploy history under the repo's Environments
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The tag is the newest commit on main
+        # Render deploys the newest commit of main, so a tag anywhere else would release
+        # code other than what it names.
+        run: |
+          git fetch --quiet origin main
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            echo "::error::$GITHUB_REF_NAME is not the newest commit on main. Tag the newest commit of main."
+            exit 1
+          fi
+
+      - name: The version in the code matches the tag
+        # services/config.py keeps MAJOR.MINOR ("1.1") - the tag v1.1.0 must agree with it.
+        run: |
+          code=$(python3 -c 'import re; print(re.search(r"^VERSION = \"([^\"]+)\"", open("services/config.py").read(), re.M).group(1))')
+          want="${GITHUB_REF_NAME#v}"
+          if [ "$code" != "${want%.*}" ] && [ "$code" != "$want" ]; then
+            echo "::error::services/config.py says VERSION = $code but the tag is $GITHUB_REF_NAME. Bump VERSION first."
+            exit 1
+          fi
+          echo "VERSION=$code" >> "$GITHUB_ENV"
+
+      - name: Deploy on Render
+        id: deploy
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK is not set: nothing was deployed."
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Wait until the server runs the new version
+        if: steps.deploy.outputs.deployed == 'true'
+        env:
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+        run: |
+          [ -n "$HEALTH_URL" ] || { echo "::error::Set the HEALTH_URL variable."; exit 1; }
+          for i in $(seq 1 80); do          # up to 20 minutes, including a cold start
+            got=$(curl -fsS -m 10 "$HEALTH_URL" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)
+            if [ "$got" = "$VERSION" ]; then echo "Server is running $got"; exit 0; fi
+            echo "waiting: server reports '${got:-no answer}', want $VERSION"
+            sleep 15
+          done
+          echo "::error::The server did not come up with version $VERSION. Check the deploy log on Render."
+          exit 1
+
+  release:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --notes-from-tag --title "$GITHUB_REF_NAME"

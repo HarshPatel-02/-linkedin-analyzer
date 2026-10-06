@@ -59,7 +59,6 @@ def test_parse_reply_with_analysis():
     suggestions, pain, analysis, meta = ai._parse_reply_full(content)
     assert len(suggestions) == 2 and pain == ""
     assert analysis == "They asked about pricing — answer it."
-    assert ai._parse_reply(content) == (suggestions, "")      # old 2-tuple API unchanged
 
 
 def test_parse_reply_without_analysis_and_bullets_fallback():
@@ -122,81 +121,6 @@ def test_chat_suggestions_without_keys_raise():
 
 
 # ─── Outreach ─────────────────────────────────────────────────────────────────
-RICH = {
-    "name": "Priya Sharma", "position": "Founder & CEO", "current_company": "Acme Health",
-    "headline": "Founder & CEO at Acme Health", "country": "Mumbai, India",
-    "activity": 'Last posted 3 days ago — "Why most clinics struggle with patient follow-ups after discharge…"',
-    "icp_score": 82, "icp_breakdown": {"Job Title Match": {"score": 25, "max": 25, "reason": "Tier 1 (founder)"}},
-    "activity_score": 71, "activity_label": "Ready to Engage", "engagement_label": "High",
-    "signal_hits": {"hiring": "we're hiring"},
-}
-
-
-def test_outreach_template_without_keys():
-    result = ai.generate_outreach(RICH)
-    assert result["source"] == "template" and "not set up" in result["notice"]
-    note = result["connection_note"]
-    assert note.startswith("Hi Priya, ") and len(note) <= ai.OUTREACH_NOTE_MAX
-    assert "recent post" in note and "Why most clinics" in note
-    assert "15-minute call" in result["message"]          # strong fit → clear ask
-    assert result["angle"].startswith("Strong ICP fit (82/100)") and "hiring" in result["angle"]
-
-
-def test_outreach_template_weak_fit_has_no_pitch_or_ask():
-    result = ai.generate_outreach({**RICH, "icp_score": 25, "activity": ""})
-    assert "We're" not in result["connection_note"]
-    assert "No agenda" in result["message"] and "call" not in result["message"]
-    assert result["angle"].startswith("Weak ICP fit")
-
-
-def test_outreach_template_with_almost_nothing():
-    result = ai.generate_outreach({})
-    assert result["connection_note"].startswith("Hi there, ") and result["source"] == "template"
-    assert result["message"] and result["angle"]
-    assert "Not enough profile details" in result["notice"]
-
-
-def test_outreach_role_hook_without_post():
-    result = ai.generate_outreach({"name": "Ravi K", "position": "CTO", "current_company": "MedTech"})
-    assert "your work as CTO at MedTech" in result["connection_note"]
-
-
-def test_outreach_ai_path(fake_ai):
-    long_note = "Hi Priya, " + "really enjoyed your post on clinic follow-ups and patient retention. " * 8
-    fake_ai["replies"].append(json.dumps({"angle": "Founder, strong fit, hiring now.",
-                                          "connection_note": long_note,
-                                          "message": "Thanks for connecting, Priya! We help clinics with follow-ups."}))
-    result = ai.generate_outreach({**RICH, "tone": "pro"})
-    assert result["source"] == "ai" and result["notice"] == ""
-    assert len(result["connection_note"]) <= ai.OUTREACH_NOTE_MAX
-    system, user = fake_ai["prompts"][0][0]["content"], fake_ai["prompts"][0][1]["content"]
-    assert "Professional tone" in system and "Strong fit" in system
-    assert "ICP fit score: 82/100" in user and "Tier 1 (founder)" in user and 'Hiring signal found' in user
-
-
-@pytest.mark.parametrize("reply", [
-    "User Safety: safe",
-    '{"angle": "x", "connection_note": "Hi [Name], let us connect today!", "message": "Thanks [Name] for connecting!"}',
-    '{"connection_note": "short", "message": "short"}',
-])
-def test_outreach_falls_back_on_unusable_ai_output(fake_ai, reply):
-    fake_ai["replies"].extend([reply] * 3)
-    result = ai.generate_outreach(RICH)
-    assert result["source"] == "template" and "AI unavailable" in result["notice"]
-    assert len(fake_ai["prompts"]) == 3
-
-
-def test_outreach_falls_back_on_ai_errors(fake_ai):
-    fake_ai["replies"].extend([ai.TransientAIError("Groq 429: slow down")] * 3)
-    result = ai.generate_outreach(RICH)
-    assert result["source"] == "template" and "Groq 429" in result["notice"]
-
-    fake_ai["replies"].append(Exception("Groq 401: bad key"))
-    result = ai.generate_outreach(RICH)
-    assert result["source"] == "template" and "401" in result["notice"]
-
-
-# ─── Review regressions ───────────────────────────────────────────────────────
 def test_unknown_sender_is_not_attributed_to_the_partner():
     t = ai._transcript([{"sender": "unknown", "text": "hello"}, {"sender": "them", "name": "Priya", "text": "hi"},
                         {"sender": "me", "text": "yo"}], "Priya")
@@ -222,22 +146,6 @@ def test_call_ai_respects_the_deadline(monkeypatch):
     assert seen == []
 
 
-def test_outreach_gives_up_on_ai_in_time_and_returns_the_template(monkeypatch):
-    clock = {"t": 1000.0}
-    monkeypatch.setattr(ai.time, "time", lambda: clock["t"])
-    monkeypatch.setattr(ai.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
-    monkeypatch.setattr(ai, "_providers", lambda: [{"name": "Fake", "url": "", "key": "k"}])
-
-    def hang(prompt, deadline=None):
-        clock["t"] += 30          # every attempt eats 30 seconds
-        raise ai.TransientAIError("Fake timed out")
-    monkeypatch.setattr(ai, "_call_ai", hang)
-    out = ai.generate_outreach({"first_name": "Priya", "position": "Founder", "current_company": "Acme"})
-    assert out["source"] == "template"
-    assert clock["t"] - 1000.0 <= ai.OUTREACH_BUDGET_S + 30
-
-
-# ─── Connect → "Add a note" ───────────────────────────────────────────────────
 PRIYA = {
     "first_name": "Priya", "name": "Priya Sharma", "position": "Founder & CEO", "current_company": "Acme Health",
     "headline": "Founder & CEO at Acme Health | Building telehealth for clinics", "country": "Mumbai, Maharashtra, India",
@@ -323,17 +231,6 @@ def test_invite_prompt_includes_pain_point_and_previous_contact(fake_ai):
     assert "Previous contact" in user and "hello there" in user
     assert "messaged them before" in fake_ai["prompts"][0][0]["content"]
     assert out["source"] == "ai" and len(out["suggestions"]) == 2, "the pain-point note counts as personal"
-
-
-def test_outreach_uses_role_pain_and_prior(fake_ai):
-    fake_ai["replies"].append(json.dumps({"angle": "a",
-        "connection_note": "Hi Priya, saw Acme Health is hiring — short note.",
-        "message": "Thanks Priya — telehealth message for your team."}))
-    ai.generate_outreach(dict(PRIYA, sender_role="Growth Lead", pain_point="slow onboarding",
-                              prior_contact='They replied: "thanks"'))
-    p = fake_ai["prompts"][0]
-    assert "on behalf of the Growth Lead" in p[0]["content"]
-    assert "Known pain point" in p[1]["content"] and "Previous contact" in p[1]["content"]
 
 
 def test_parse_reply_returns_intent_tone_and_follow_up():

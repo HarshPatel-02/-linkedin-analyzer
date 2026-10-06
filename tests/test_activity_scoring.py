@@ -103,7 +103,7 @@ def test_engagement_from_posts_ignores_posts_without_counts(ago):
     assert result["engagement_label"] == "High"
 
 
-# ─── Completeness, mutuals, signals ───────────────────────────────────────────
+# ─── Completeness, signals ───────────────────────────────────────────
 def test_completeness_missing_parts():
     result = score(profile(headline="Founder", about="We build things", experience="",
                            current_company="Not specified", avatar=""))
@@ -117,15 +117,12 @@ def test_completeness_full():
     assert result["completeness_missing"] == [] and result["score_completeness"] == 10
 
 
-@pytest.mark.parametrize("mutuals, points", [(0, 0), (1, 2), (4, 2), (5, 5), (9, 5), (10, 7), (19, 7), (20, 10), (99, 10)])
-def test_mutual_connection_tiers(mutuals, points):
-    assert score(profile(mutual_connections=mutuals))["score_mutuals"] == points
 
 
 def test_signal_hits_whole_words():
     result = score(profile(about="We're hiring engineers after our Series A!"))
     assert result["signal_hits"] == {"hiring": "hiring", "growth": "series a"}   # first keyword in list order
-    assert result["score_signals"] == 7
+    assert result["score_signals"] == 14     # 50% + 20% of 20
 
 
 def test_job_seeking_is_not_a_signal():
@@ -137,7 +134,7 @@ def test_job_seeking_is_not_a_signal():
 def test_recent_promotion_is_the_middle_signal():
     result = score(profile(about="Excited to announce my new role as VP of Sales!"))
     assert result["signal_hits"] == {"job": "excited to announce"}
-    assert result["score_signals"] == 3
+    assert result["score_signals"] == 6      # 30% of 20
 
 
 def test_signals_scan_only_the_five_newest_posts(ago):
@@ -149,7 +146,7 @@ def test_signals_scan_only_the_five_newest_posts(ago):
 
 
 def test_custom_signal_keywords_are_used():
-    sc.save_signal_keywords({"hiring": ["join us"]})
+    sc.bind_activity_settings(None, {"hiring": ["join us"]})
     result = score(profile(headline="Come join us at Acme"))
     assert result["signal_hits"] == {"hiring": "join us"}
 
@@ -159,28 +156,22 @@ def test_total_and_label(ago):
     posts = [{"url": f"u{i}", "text": f"post {i}", "postedAt": ago(i * 3 + 1),
               "numLikes": 12, "numComments": 6, "numShares": 3} for i in range(10)]
     prof = profile(position="Founder", about="We're hiring", experience="Founder @ X",
-                   current_company="Acme", avatar="a.png", mutual_connections=25)
+                   current_company="Acme", avatar="a.png")
     result = score(prof, raw={"name": "X"}, posts=posts)
-    # 30 + 20 + 20 + 10 + 5 (hiring only) + 10 = 95
-    assert result["score_total"] == 95
+    # 30 + 20 + 20 + 10 + 10 (hiring only: half of 20) = 90 of 100 - the rows add up to the score
+    assert result["score_raw"] == 90 and result["score_max"] == 100
+    assert result["score_total"] == 90
     assert result["score_label"].endswith("Ready to Engage")
     assert result["posts_analyzed"] == 10
 
 
 def test_custom_points_scale_to_100(ago):
-    sc.save_activity_points({"recent_activity": 50})
+    sc.bind_activity_settings({"recent_activity": 50}, None)
     result = score(posts=[{"text": "hi", "postedAt": ago(1)}])
     assert result["score_activity"] == 50 and result["max_activity"] == 50
     assert result["score_max"] == 120
     assert result["score_raw"] == 50 + 10   # + one post in the 90-day window (half of 20)
     assert result["score_total"] == 50      # 60 / 120
-
-
-def test_reset_points_restores_defaults():
-    sc.save_activity_points({"signals": 40})
-    assert sc.get_activity_points()["signals"] == 40
-    sc.save_activity_points({"reset": True})
-    assert sc.get_activity_points() == sc.DEFAULT_ACTIVITY_POINTS
 
 
 # ─── Post ownership: reposts of other people's posts ─────────────────────────
@@ -254,3 +245,15 @@ def test_display_labels_a_repost_when_it_is_the_only_activity(ago):
 def test_no_posts_leaves_activity_date_empty():
     prof = map_apify_to_profile({"name": "Jane Doe"}, URL, [])
     assert prof.activity == "No recent activity" and prof.activity_date == ""
+
+
+def test_the_rows_add_up_to_the_score(ago):
+    """Andrian's rows read 30 + 20 + 20 + 10 + 0 = 80 while the score said 89: removing
+    Mutual Connections left a 90-point budget that was then scaled up to 100. With the
+    default points the score is exactly the sum of the rows."""
+    posts = [{"text": f"post {i}", "postedAt": ago(i + 1), "numLikes": 25, "numComments": 11} for i in range(20)]
+    r = score(profile(position="Founder", about="AI automation", experience="Founder @ X",
+                      current_company="VLAI", avatar="a.png"), raw={"name": "X"}, posts=posts)
+    rows = r["score_activity"] + r["score_posts"] + r["score_engagement"] + r["score_completeness"] + r["score_signals"]
+    assert sum(sc.DEFAULT_ACTIVITY_POINTS.values()) == 100
+    assert rows == 80 and r["score_total"] == 80

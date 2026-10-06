@@ -7,7 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from services import actor_service, ai_service, icp_service
+from routers import common
+from services import actor_service, ai_service
 from services.apify_token import MISSING, current_apify_token
 
 EXTENSION_ORIGIN = "chrome-extension://" + "a" * 32
@@ -26,8 +27,8 @@ def _record_tokens(monkeypatch):
         seen.append((url, current_apify_token()))
         return {"name": "Priya Sharma", "position": "Founder"}
 
-    monkeypatch.setattr(main, "run_apify_actor", profile)
-    monkeypatch.setattr(main, "run_posts_actor", lambda url, max_posts=20, errors=None: [])
+    monkeypatch.setattr(common, "run_apify_actor", profile)
+    monkeypatch.setattr(common, "run_posts_actor", lambda url, max_posts=20, errors=None: [])
     return seen
 
 
@@ -62,8 +63,8 @@ def test_concurrent_requests_each_see_their_own_token(monkeypatch):
         seen[url] = current_apify_token()
         return {"name": "Someone"}
 
-    monkeypatch.setattr(main, "run_apify_actor", slow_profile)
-    monkeypatch.setattr(main, "run_posts_actor", lambda url, max_posts=20, errors=None: [])
+    monkeypatch.setattr(common, "run_apify_actor", slow_profile)
+    monkeypatch.setattr(common, "run_posts_actor", lambda url, max_posts=20, errors=None: [])
 
     async def both():
         transport = httpx.ASGITransport(app=main.app)
@@ -97,7 +98,9 @@ def test_the_actors_say_where_the_token_goes_when_it_is_missing(monkeypatch):
     errors: list = []
     assert actor_service.run_posts_actor("https://www.linkedin.com/in/a/", errors=errors) == []
     assert errors == ["posts actor skipped: " + MISSING]
-    assert icp_service.run_company_actor("https://www.linkedin.com/in/a/") == {}
+    notes: list = []
+    assert actor_service.run_company_actor("https://www.linkedin.com/in/a/", notes) == {}
+    assert notes and "Development section" in notes[0]
 
 
 def test_a_failed_posts_fetch_is_not_cached():

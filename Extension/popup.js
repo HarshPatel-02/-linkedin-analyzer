@@ -3,10 +3,6 @@ const PITCH_FIELDS = ["who", "expertise", "offer", "services", "casual_opener"];
 
 const $ = (id) => document.getElementById(id);
 
-function esc(s) {
-  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
 function ago(ts) {
   if (!ts) return "";
   const mins = Math.round((Date.now() - ts) / 60000);
@@ -44,12 +40,12 @@ function render() {
     $("due-count").textContent = due.length;
     $("due-list").innerHTML = due.length ? due.map((l) =>
       '<div class="card">' +
-        '<div class="name">' + esc(l.name || "Unknown") + "</div>" +
-        '<div class="meta">' + (l.lastSentKind === "invite" ? "Invite note" : "Message") + " sent " + esc(ago(l.lastSentAt)) + " · no reply yet</div>" +
-        '<div class="text">' + esc((l.lastSentText || "").slice(0, 160)) + "</div>" +
+        '<div class="name">' + liEsc(l.name || "Unknown") + "</div>" +
+        '<div class="meta">' + (l.lastSentKind === "invite" ? "Invite note" : "Message") + " sent " + liEsc(ago(l.lastSentAt)) + " · no reply yet</div>" +
+        '<div class="text">' + liEsc((l.lastSentText || "").slice(0, 160)) + "</div>" +
         '<div class="actions">' +
-          (l.url ? '<button type="button" class="btn primary" data-open="' + esc(l.url) + '">Open profile</button>' : "") +
-          '<button type="button" class="btn" data-done="' + esc(l.key) + '">Done</button>' +
+          (l.url ? '<button type="button" class="btn primary" data-open="' + liEsc(l.url) + '">Open profile</button>' : "") +
+          '<button type="button" class="btn" data-done="' + liEsc(l.key) + '">Done</button>' +
         "</div>" +
       "</div>").join("")
       : '<div class="empty">🎉 No follow-ups due.<br>Messages and invite notes you send on LinkedIn are tracked here.</div>';
@@ -57,23 +53,46 @@ function render() {
     const waiting = Object.values(leads).filter((l) => l.awaitingReply).length - due.length;
     $("waiting-line").textContent = waiting > 0 ? waiting + " more waiting for a reply (not due yet)." : "";
 
-    const list = Object.values(leads).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    // Each card carries its storage key (as the follow-ups do) so its delete button can find it.
+    const list = Object.entries(leads).map(([key, l]) => Object.assign({ key }, l))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     $("lead-count").textContent = list.length + " lead" + (list.length === 1 ? "" : "s") + " logged";
     $("lead-list").innerHTML = list.length ? list.slice(0, 40).map((l) =>
       '<div class="card">' +
-        '<div class="name">' + esc(l.name || "Unknown") + "</div>" +
-        '<div class="meta">' + esc([l.headline, l.company].filter(Boolean).join(" · ").slice(0, 90)) + "</div>" +
+        '<div class="name">' + liEsc(l.name || "Unknown") + "</div>" +
+        '<div class="meta">' + liEsc([l.headline, l.company].filter(Boolean).join(" · ").slice(0, 90)) + "</div>" +
         "<div>" +
-          (l.icpScore != null ? '<span class="chip">ICP ' + esc(l.icpScore) + "</span>" : "") +
-          (l.activityScore != null ? '<span class="chip">Activity ' + esc(l.activityScore) + "</span>" : "") +
+          (l.icpScore != null ? '<span class="chip">ICP ' + liEsc(l.icpScore) + "</span>" : "") +
+          (l.activityScore != null ? '<span class="chip">Activity ' + liEsc(l.activityScore) + "</span>" : "") +
           (l.awaitingReply ? '<span class="chip">awaiting reply</span>' : "") +
         "</div>" +
-        (l.painPoint ? '<div class="text" style="margin-top:4px;">🎯 ' + esc(l.painPoint) + "</div>" : "") +
-        (l.url ? '<div class="actions"><button type="button" class="btn" data-open="' + esc(l.url) + '">Open profile</button></div>' : "") +
+        (l.painPoint ? '<div class="text" style="margin-top:4px;">🎯 ' + liEsc(l.painPoint) + "</div>" : "") +
+        '<div class="actions">' +
+          (l.url ? '<button type="button" class="btn" data-open="' + liEsc(l.url) + '">Open profile</button>' : "") +
+          // Icon-only: the card already names the lead, and the label names them again.
+          '<button type="button" class="btn danger icon" data-delete="' + liEsc(l.key) + '" aria-label="Delete ' + liEsc(l.name || "this lead") +
+            '" title="Delete lead"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4M6.8 6.8v4.4M9.2 6.8v4.4"/></svg></button>' +
+        "</div>" +
       "</div>").join("")
       : '<div class="empty">No leads yet. Scores (Activity / ICP), ✨ pain points and sent messages are logged here.</div>';
 
     document.querySelectorAll("[data-open]").forEach((b) => { b.onclick = () => openUrl(b.dataset.open); });
+    document.querySelectorAll("[data-delete]").forEach((b) => {
+      b.onclick = () => load((all) => {
+        const lead = all[b.dataset.delete];
+        if (!lead) return;
+        const who = lead.name || "this lead";
+        if (!confirm("Delete " + who + "?\n\nTheir scores, notes and drafts are erased here and in the admin. This cannot be undone.")) return;
+        b.disabled = true;
+        chrome.runtime.sendMessage({ type: "li-admin", action: "forget", url: lead.url || "", name: lead.name || "" }, (res) => {
+          $("admin-status").textContent = res && res.admin
+            ? "🗑 " + who + " deleted here and in the admin."
+            : "🗑 " + who + " deleted here. The admin could not be reached (" + ((res && res.error) || "no answer") +
+              ") - delete them there too, or they stay in the admin.";
+          render();
+        });
+      });
+    });
     document.querySelectorAll("[data-done]").forEach((b) => {
       b.onclick = () => load((all) => {
         const lead = all[b.dataset.done];
@@ -105,12 +124,24 @@ $("clear-leads").onclick = () => {
 };
 
 // ─── Admin panel (LeadAgent) connection ───────────────────────────────────────
-const ADMIN_LEADS_URL = "http://localhost:5173/leads";
-const adminMsg = (action) => new Promise((res) => chrome.runtime.sendMessage({ type: "li-admin", action }, res));
+const adminMsg = (action) => liAsk({ type: "li-admin", action });
+
+// The admin's own web address comes from the admin (its /auth/config), so a hosted admin
+// opens where it really is; an older admin that doesn't say falls back to the local one.
+async function adminLeadsUrl() {
+  const base = await new Promise((res) =>
+    chrome.storage.local.get([LI_SETTINGS_KEY], (r) => res(liAdminBase((r && r[LI_SETTINGS_KEY]) || {}))));
+  try {
+    const resp = await fetchWithTimeout(base + "/auth/config", {}, LI_TIMEOUTS.check);
+    const ui = resp.ok ? (await resp.json()).frontendUrl : "";
+    if (ui) return String(ui).replace(/\/$/, "") + "/leads";
+  } catch (e) { /* fall back below */ }
+  return LI_ADMIN_UI_DEFAULT + "/leads";
+}
 
 async function adminStatus() {
   const r = await adminMsg("status");
-  if (!r || !r.ok) { $("admin-status").textContent = "⚪ Admin panel not connected (" + esc((r && r.error) || "no response") + ")"; return null; }
+  if (!r || !r.ok) { $("admin-status").textContent = "⚪ Admin panel not connected (" + liEsc((r && r.error) || "no response") + ")"; return null; }
   const d = r.data;
   const sso = d.ssoConfigured ? (d.ssoConnected ? "SSO: " + (d.ssoName || "connected") : "SSO not connected") : "SSO not configured (dev)";
   $("admin-status").textContent = "🟢 Connected · " + sso + " · active ICP: " +
@@ -118,7 +149,7 @@ async function adminStatus() {
   return d;
 }
 
-$("admin-open").onclick = () => openUrl(ADMIN_LEADS_URL);
+$("admin-open").onclick = async () => openUrl(await adminLeadsUrl());
 $("admin-sync").onclick = async () => {
   $("admin-sync").disabled = true;
   $("admin-status").textContent = "Syncing…";
@@ -128,11 +159,11 @@ $("admin-sync").onclick = async () => {
     const d = r.data;
     $("admin-status").textContent = d.synced
       ? "✅ Synced " + d.synced + " lead" + (d.synced === 1 ? "" : "s") +
-        ' to ICP "' + esc(d.icpName) + '" — open the admin to see them.'
+        ' to ICP "' + liEsc(d.icpName) + '" — open the admin to see them.'
       : "⚠️ Nothing synced: all " + (d.received || 0) + " logged lead" + (d.received === 1 ? "" : "s") +
         " lack a profile link and a name, so they can't be identified.";
   } catch (e) {
-    $("admin-status").textContent = "❌ Sync failed: " + esc(e.message);
+    $("admin-status").textContent = "❌ Sync failed: " + liEsc(e.message);
   } finally {
     $("admin-sync").disabled = false;
   }
@@ -164,7 +195,7 @@ async function saveApiBase(url) {
       $("api-base").value = clean;
       $("api-status").textContent = "Testing " + API_BASE + "…";
       try {
-        const resp = await fetchWithTimeout(API_BASE + "/health", {}, 12000);
+        const resp = await fetchWithTimeout(API_BASE + "/health", {}, LI_TIMEOUTS.check);
         const data = await resp.json().catch(() => ({}));
         $("api-status").textContent = resp.ok && data.status === "ok"
           ? "✅ Connected to " + API_BASE
@@ -188,7 +219,9 @@ async function saveAdminBase(url) {
     chrome.storage.local.set({ [LI_SETTINGS_KEY]: settings }, async () => {
       const base = liAdminBase(settings);
       try {
-        const resp = await fetchWithTimeout(base + "/extension/status", {}, 12000);
+        const token = await liGetAuthToken();
+        const resp = await fetchWithTimeout(base + "/extension/status",
+          { headers: token ? { Authorization: "Bearer " + token } : {} }, LI_TIMEOUTS.check);
         const data = await resp.json().catch(() => ({}));
         $("api-status").textContent = resp.ok
           ? "✅ Admin connected · scoring ICP: " + ((data.activeIcp && data.activeIcp.name) || "none selected")
@@ -205,10 +238,24 @@ $("api-hosted").onclick = () => { $("api-base").value = LI_API_HOSTED; saveApiBa
 // A sleeping Render server can take ~30-50s to answer; don't wait forever.
 async function fetchWithTimeout(url, init, ms) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms || 45000);
+  const timer = setTimeout(() => ctrl.abort(), ms || LI_TIMEOUTS.analyzer);
   try { return await fetch(url, Object.assign({}, init, { signal: ctrl.signal })); }
   catch (e) { throw new Error(e && e.name === "AbortError" ? "timed out — the server may be waking up, try again" : "backend unreachable"); }
   finally { clearTimeout(timer); }
+}
+
+// An analyzer call through the background worker, like the content scripts make: it adds
+// the server key and the Apify token, which a hosted analyzer requires.
+async function analyzerCall(path, body) {
+  const res = await liAsk({ type: "li-api", path, method: body === undefined ? "GET" : "POST", body,
+                            timeoutMs: LI_TIMEOUTS.analyzer });
+  if (!res) throw new Error("the extension's background worker didn't answer - reopen the popup");
+  if (res.error) throw new Error(res.error);
+  if (!res.ok) {
+    const d = res.data && res.data.detail;
+    throw new Error(typeof d === "string" ? d : "server error " + res.status);
+  }
+  return res.data;
 }
 
 const pitchSaveBtn = () => document.querySelector('#pitch-form button[type="submit"]');
@@ -217,9 +264,7 @@ async function loadPitch() {
   $("pitch-status").textContent = "Loading…";
   pitchSaveBtn().disabled = true;   // saving half-loaded fields would replace your pitch
   try {
-    const resp = await fetchWithTimeout(API_BASE + "/pitch-config");
-    if (!resp.ok) throw new Error("server error " + resp.status);
-    const pitch = await resp.json();
+    const pitch = await analyzerCall("/pitch-config");
     PITCH_FIELDS.forEach((k) => { $("p-" + k).value = pitch[k] || ""; });
     $("pitch-status").textContent = "";
     pitchSaveBtn().disabled = false;
@@ -235,10 +280,7 @@ $("pitch-form").onsubmit = async (e) => {
   $("pitch-status").textContent = "Saving…";
   pitchSaveBtn().disabled = true;
   try {
-    const resp = await fetchWithTimeout(API_BASE + "/pitch-config", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw new Error("server error " + resp.status);
+    await analyzerCall("/pitch-config", body);
     // Keep the ✨ Setup preferences in step: role = "Who you are". Tone is not
     // saved here — each AI note / AI suggestion picks its own tone as you write.
     chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
@@ -282,19 +324,70 @@ function maskToken(token) {
   return head + "•".repeat(10) + (token.length > 12 ? token.slice(-4) : "");
 }
 
+// The two secrets of the Development section. Both are stored in liDev (never in
+// liSettings, which reaches LinkedIn's page), never written back into the page, and shown
+// only masked. Each entry is one input with Show/Hide, Save and Clear.
+const SECRET_FIELDS = [
+  {
+    field: "apifyToken", input: "apify-token", reveal: "apify-reveal", saved: "apify-saved",
+    save: "apify-save", clear: "apify-clear", noun: "token",
+    empty: "No token saved — Apify calls are skipped and scores use page data only.",
+    looksRight: (v) => v.startsWith("apify_api_"),
+    savedOk: "✅ Saved — the next Apify call uses it.",
+    savedOdd: "⚠️ Saved, but Apify tokens start with apify_api_ — check it's the right value.",
+    confirmClear: "Remove the saved Apify token? Apify calls are skipped until a new one is saved.",
+    cleared: "Token removed.",
+  },
+  {
+    // The analyzer's server key (ANALYZER_API_KEY on Render).
+    field: "apiKey", input: "server-key", reveal: "server-key-reveal", saved: "server-key-saved",
+    save: "server-key-save", clear: "server-key-clear", noun: "key",
+    empty: "No key saved — fine for a local backend; a Render backend refuses every call without it.",
+    looksRight: (v) => v.length >= 24,
+    savedOk: "✅ Saved — the next backend call sends it.",
+    savedOdd: "⚠️ Saved, but that is short for a server key — use the exact ANALYZER_API_KEY value from Render.",
+    confirmClear: "Remove the saved server key? A Render backend refuses every call until a new one is saved.",
+    cleared: "Key removed.",
+  },
+];
+
 function renderDev(dev) {
   $("dev-section").hidden = !dev.devMode;
-  $("apify-saved").textContent = dev.apifyToken
-    ? "Saved · " + maskToken(dev.apifyToken)
-    : "No token saved — Apify calls are skipped and scores use page data only.";
-  $("apify-clear").disabled = !dev.apifyToken;
+  for (const f of SECRET_FIELDS) {
+    $(f.saved).textContent = dev[f.field] ? "Saved · " + maskToken(dev[f.field]) : f.empty;
+    $(f.clear).disabled = !dev[f.field];
+  }
 }
 
-function setReveal(on) {
-  $("apify-token").type = on ? "text" : "password";
-  $("apify-reveal").textContent = on ? "Hide" : "Show";
-  $("apify-reveal").setAttribute("aria-pressed", on ? "true" : "false");
+function wireSecretField(f) {
+  const setReveal = (on) => {
+    $(f.input).type = on ? "text" : "password";
+    $(f.reveal).textContent = on ? "Hide" : "Show";
+    $(f.reveal).setAttribute("aria-pressed", on ? "true" : "false");
+  };
+  const save = () => {
+    const value = $(f.input).value.trim();
+    if (!value) { $("dev-status").textContent = `Paste the ${f.noun} first — or Clear to remove the saved one.`; return; }
+    if (/\s/.test(value)) { $("dev-status").textContent = `❌ A ${f.noun} has no spaces — check what was pasted.`; return; }
+    updateDev({ [f.field]: value }, (next) => {
+      $(f.input).value = "";
+      setReveal(false);
+      renderDev(next);
+      $("dev-status").textContent = f.looksRight(value) ? f.savedOk : f.savedOdd;
+    });
+  };
+  $(f.reveal).onclick = () => setReveal($(f.input).type === "password");
+  $(f.save).onclick = save;
+  $(f.input).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } });
+  $(f.clear).onclick = () => {
+    if (!confirm(f.confirmClear)) return;
+    updateDev({ [f.field]: "" }, (next) => {
+      renderDev(next);
+      $("dev-status").textContent = f.cleared;
+    });
+  };
 }
+SECRET_FIELDS.forEach(wireSecretField);
 
 let titleClicks = [];
 document.querySelector("header h1").addEventListener("click", () => {
@@ -317,33 +410,6 @@ document.querySelector("header h1").addEventListener("click", () => {
   }));
 });
 
-$("apify-reveal").onclick = () => setReveal($("apify-token").type === "password");
-
-function saveApifyToken() {
-  const token = $("apify-token").value.trim();
-  if (!token) { $("dev-status").textContent = "Paste a token first — or Clear to remove the saved one."; return; }
-  if (/\s/.test(token)) { $("dev-status").textContent = "❌ A token has no spaces — check what was pasted."; return; }
-  updateDev({ apifyToken: token }, (next) => {
-    $("apify-token").value = "";
-    setReveal(false);
-    renderDev(next);
-    $("dev-status").textContent = token.startsWith("apify_api_")
-      ? "✅ Saved — the next Apify call uses it."
-      : "⚠️ Saved, but Apify tokens start with apify_api_ — check it's the right value.";
-  });
-}
-
-$("apify-save").onclick = saveApifyToken;
-$("apify-token").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveApifyToken(); } });
-
-$("apify-clear").onclick = () => {
-  if (!confirm("Remove the saved Apify token? Apify calls are skipped until a new one is saved.")) return;
-  updateDev({ apifyToken: "" }, (next) => {
-    renderDev(next);
-    $("dev-status").textContent = "Token removed.";
-  });
-};
-
 // ─── Sign-in gate (session in leads.js: liSignIn / liSignOut / liGetAuth) ────
 // The popup is either the sign-in screen or the app, never both. Everything the
 // app does — reading leads, calling the backend, the Apify token — waits behind
@@ -359,18 +425,23 @@ function showSignInError(message) {
 function setSignInBusy(busy) {
   $("signin-submit").disabled = busy;
   $("signin-submit").textContent = busy ? "Signing in…" : "Sign in";
-  $("signin-email").disabled = busy;
-  $("signin-password").disabled = busy;
+  $("signin-key").disabled = busy;
+  $("signin-admin").disabled = busy;
 }
 
 function showGate() {
   $("app").hidden = true;
   $("auth-gate").hidden = false;
-  $("signin-password").value = "";
+  $("signin-key").value = "";
   setSignInReveal(false);
   showSignInError("");
   setSignInBusy(false);
-  $("signin-email").focus();
+  // The admin address is needed before signing in, so it is asked for here too.
+  chrome.storage.local.get([LI_SETTINGS_KEY], (r) => {
+    const saved = ((r && r[LI_SETTINGS_KEY]) || {}).adminBase;
+    $("signin-admin").value = saved || LI_ADMIN_DEFAULT;
+  });
+  $("signin-key").focus();
 }
 
 // The app is only ever started once, however often the gate is crossed: its
@@ -379,7 +450,7 @@ function showApp(auth) {
   $("auth-gate").hidden = true;
   $("app").hidden = false;
   $("account-email").textContent = auth.email;
-  $("account-email").title = "Signed in as " + auth.email;
+  $("account-email").title = "Signed in as " + (auth.name ? auth.name + " · " : "") + auth.email;
   if (appStarted) { render(); return; }
   appStarted = true;
   render();
@@ -388,25 +459,25 @@ function showApp(auth) {
 }
 
 function setSignInReveal(on) {
-  $("signin-password").type = on ? "text" : "password";
+  $("signin-key").type = on ? "text" : "password";
   $("signin-reveal").textContent = on ? "Hide" : "Show";
   $("signin-reveal").setAttribute("aria-pressed", on ? "true" : "false");
 }
 
-$("signin-reveal").onclick = () => setSignInReveal($("signin-password").type === "password");
+$("signin-reveal").onclick = () => setSignInReveal($("signin-key").type === "password");
 
 $("signin-form").onsubmit = async (e) => {
   e.preventDefault();
   showSignInError("");
   setSignInBusy(true);
   try {
-    showApp(await liSignIn($("signin-email").value, $("signin-password").value));
-    $("signin-password").value = "";
+    showApp(await liSignIn($("signin-key").value, $("signin-admin").value));
+    $("signin-key").value = "";
   } catch (err) {
-    showSignInError(err.message || "Could not sign in — try again.");
+    showSignInError(err.message || "Could not sign in - try again.");
     setSignInBusy(false);
     // Send them back to the field that needs fixing, not to the top of the form.
-    (/password/i.test(err.message || "") ? $("signin-password") : $("signin-email")).focus();
+    (/admin|address|reach/i.test(err.message || "") ? $("signin-admin") : $("signin-key")).focus();
     return;
   }
   setSignInBusy(false);

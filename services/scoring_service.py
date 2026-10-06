@@ -1,4 +1,5 @@
 import json
+from contextvars import ContextVar
 import math
 import os
 import re
@@ -6,7 +7,8 @@ from datetime import datetime, timezone
 from fractions import Fraction
 from urllib.parse import unquote
 from models import ProfileData
-from services.config_store import read_config, write_config
+from services.config import BASE_DIR
+from services.config_store import read_config
 from services.matching import normalize, first_match, pts
 
 # ─── Editable points ──────────────────────────────────────────────────────────
@@ -14,7 +16,6 @@ from services.matching import normalize, first_match, pts
 # and saved to activity_points.json (GET/POST /activity-points). Each factor's
 # own rules (e.g. posted within 7 / 30 / 90 days) scale with its max, and the
 # total is scaled to 100 — with the defaults nothing changes.
-BASE_DIR             = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTIVITY_POINTS_FILE = os.path.join(BASE_DIR, "activity_points.json")
 
 DEFAULT_ACTIVITY_POINTS = {
@@ -22,8 +23,9 @@ DEFAULT_ACTIVITY_POINTS = {
     "posting_frequency":  20,
     "engagement":         20,
     "completeness":       10,
-    "signals":            10,
-    "mutual_connections": 10,
+    # 20, not 10: the 10 points Mutual Connections held moved here when that factor went,
+    # so the five rows add up to the 100 the score is shown out of.
+    "signals":            20,
 }
 
 
@@ -40,44 +42,32 @@ def _clean_points(values, defaults: dict, fallback: dict) -> dict:
     return out
 
 
-def get_activity_points() -> dict:
+# ── Per-request settings ──────────────────────────────────────────────────────
+# A signed-in user's own points and keywords arrive with their request (/analyze from
+# the extension, /collect from the admin) and apply to that request only. Saving them
+# here, in one shared file, let one user's change rewrite every other user's scores.
+# A context variable, like the Apify token: asyncio.to_thread copies it into the worker
+# that scores, and one request's value can never be seen by another.
+_request_settings: ContextVar = ContextVar("activity_settings", default=None)
+
+
+def bind_activity_settings(points=None, keywords=None) -> None:
+    """Call at the start of a request that carries its own Activity settings."""
+    _request_settings.set({"points": points, "keywords": keywords} if (points or keywords) else None)
+
+
+def _saved_points() -> dict:
     return read_config(ACTIVITY_POINTS_FILE,
                         lambda v: _clean_points(v, DEFAULT_ACTIVITY_POINTS, DEFAULT_ACTIVITY_POINTS))
 
 
-def save_activity_points(values: dict) -> dict:
-    """Keys left out keep their saved value; {"reset": true} restores the defaults."""
-    points = (dict(DEFAULT_ACTIVITY_POINTS) if isinstance(values, dict) and values.get("reset")
-              else _clean_points(values, DEFAULT_ACTIVITY_POINTS, get_activity_points()))
-    return write_config(ACTIVITY_POINTS_FILE, points)
+def get_activity_points() -> dict:
+    """This request's points if it brought its own, else the saved file."""
+    own = _request_settings.get()
+    if own and isinstance(own.get("points"), dict):
+        return _clean_points(own["points"], DEFAULT_ACTIVITY_POINTS, DEFAULT_ACTIVITY_POINTS)
+    return _saved_points()
 
-
-# Requirements, edited in the Activity form (activity_rules.json via GET/POST
-# /activity-rules). Kept out of the points file on purpose: every value there is summed
-# into the maximum, so a "2" would quietly become two more possible points.
-ACTIVITY_RULES_FILE = os.path.join(BASE_DIR, "activity_rules.json")
-DEFAULT_ACTIVITY_RULES = {"mutual_min": 0}      # 0 = no requirement
-
-# Failing a requirement caps the total here: the top of "Difficult to Engage".
-REQUIRED_CAP = 39
-
-
-def _clean_rules(values, fallback: dict) -> dict:
-    out = dict(fallback)
-    if isinstance(values, dict) and values.get("mutual_min") is not None:
-        try:
-            out["mutual_min"] = max(0, min(500, int(round(float(values["mutual_min"])))))
-        except (TypeError, ValueError):
-            pass
-    return out
-
-
-def get_activity_rules() -> dict:
-    return read_config(ACTIVITY_RULES_FILE, lambda v: _clean_rules(v, DEFAULT_ACTIVITY_RULES))
-
-
-def save_activity_rules(values: dict) -> dict:
-    return write_config(ACTIVITY_RULES_FILE, _clean_rules(values, get_activity_rules()))
 
 
 # Hiring / growth signal keywords (edited as chips in the Activity form, saved to
@@ -116,16 +106,17 @@ def _clean_keywords(values, fallback: dict) -> dict:
     return out
 
 
-def get_signal_keywords() -> dict:
+def _saved_keywords() -> dict:
     return read_config(ACTIVITY_KEYWORDS_FILE, lambda v: _clean_keywords(v, DEFAULT_SIGNAL_KEYWORDS))
 
 
-def save_signal_keywords(values: dict) -> dict:
-    """Lists left out keep their saved value; {"reset": true} restores the defaults."""
-    lists = ({k: list(v) for k, v in DEFAULT_SIGNAL_KEYWORDS.items()}
-             if isinstance(values, dict) and values.get("reset")
-             else _clean_keywords(values, get_signal_keywords()))
-    return write_config(ACTIVITY_KEYWORDS_FILE, lists)
+def get_signal_keywords() -> dict:
+    """This request's keywords if it brought its own, else the saved file."""
+    own = _request_settings.get()
+    if own and isinstance(own.get("keywords"), dict):
+        return _clean_keywords(own["keywords"], DEFAULT_SIGNAL_KEYWORDS)
+    return _saved_keywords()
+
 
 
 def _scaled(earned: float, default_max: float, new_max: float) -> int:
@@ -199,7 +190,7 @@ def calc_days_ago(dt_str: str):
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
         return (datetime.now(timezone.utc) - dt).days
-    except:
+    except (ValueError, TypeError):
         return None
 
 def parse_activity_to_days(activity_text: str):
@@ -228,11 +219,19 @@ def parse_activity_to_days(activity_text: str):
 # ─── Post helpers ─────────────────────────────────────────────────────────────
 POST_ID_KEYS   = ("url", "postUrl", "post_url", "link", "urn", "postUrn", "shareUrn", "activityUrn", "id")
 POST_TEXT_KEYS = ("text", "content", "postText", "commentary", "description", "title")
+POST_URL_KEYS  = ("url", "linkedinUrl", "postUrl", "post_url", "link")
 
 LIKE_KEYS    = ("numLikes", "likes", "likesCount", "likeCount", "reactionsCount", "numReactions",
                 "totalReactionCount", "reactionCount", "reactions")
 COMMENT_KEYS = ("numComments", "comments", "commentsCount", "commentCount")
 REPOST_KEYS  = ("numShares", "shares", "sharesCount", "repostsCount", "numReposts", "repostCount", "reposts")
+
+
+def post_url(post) -> str:
+    """A post's own link, whichever key the actor used."""
+    if not isinstance(post, dict):
+        return ""
+    return next((str(post[k]) for k in POST_URL_KEYS if post.get(k)), "")
 
 
 def post_text(post) -> str:
@@ -392,7 +391,6 @@ POSTING_TIERS  = [(10, Fraction(1)), (5, Fraction(3, 4)), (1, Fraction(1, 2))]  
 # strong: likes ≥ 10, comments ≥ 5, reposts ≥ 3 · some: likes ≥ 3, comments ≥ 2, reposts ≥ 1
 # High = two strong signals, Medium = one strong (or two some), Low = anything at all.
 ENGAGEMENT_SHARES = {"High": Fraction(1), "Medium": Fraction(1, 2), "Low": Fraction(1, 4)}
-MUTUAL_TIERS   = [(20, Fraction(1)), (10, Fraction(7, 10)), (5, Fraction(1, 2)), (1, Fraction(1, 5))]  # 10/7/5/2
 SIGNAL_SHARES  = {"hiring": Fraction(1, 2), "job": Fraction(3, 10), "growth": Fraction(1, 5)}          # 5/3/2
 COMPLETENESS_PARTS = ["photo", "headline", "about", "experience", "company"]                            # 2 each
 
@@ -494,19 +492,6 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
     score_completeness = pts(P["completeness"], Fraction(len(COMPLETENESS_PARTS) - len(completeness_missing),
                                                          len(COMPLETENESS_PARTS)))
 
-    # MUTUAL_CONNECTIONS
-    # With a required minimum set, that number IS the bar: reaching it earns the factor's
-    # whole points and falling short earns none. Scoring 3 mutuals as 2/10 while the
-    # administrator had asked for "at least 2" contradicted the rule they wrote.
-    # With no requirement (mutual_min = 0) the default ladder decides instead.
-    R = get_activity_rules()
-    mutuals = int(profile.mutual_connections or 0)
-    if R["mutual_min"]:
-        mutual_share = Fraction(1) if mutuals >= R["mutual_min"] else Fraction(0)
-    else:
-        mutual_share = _tier(mutuals, MUTUAL_TIERS)
-    score_mutuals = pts(P["mutual_connections"], mutual_share)
-
     # HIRING_GROWTH_SIGNALS — keyword lists editable in the Activity form (activity_keywords.json),
     # whole-word matches in the About, headline, position and the 5 newest OWN posts
     # (a reposted "we're hiring" is the original author's news, not this person's)
@@ -529,18 +514,10 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
     score_signals = pts(P["signals"], share)
 
     raw_total = (score_activity + score_posts + score_engagement +
-                 score_completeness + score_signals + score_mutuals)
+                 score_completeness + score_signals)
     max_total = sum(P.values())
     # Shown out of 100 whatever the points add up to (the defaults total 100)
     total = pts(100, Fraction(raw_total, max_total)) if max_total else 0
-
-    # A required minimum of mutual connections: falling short caps the whole score,
-    # however active the person is - "compulsory" means not a good lead without it.
-    uncapped = total
-    failed_required = []
-    if R["mutual_min"] and mutuals < R["mutual_min"]:
-        failed_required.append(f"{R['mutual_min']}+ mutual connections (has {mutuals})")
-        total = min(total, REQUIRED_CAP)
 
     if total >= 70:   label = "\U0001f7e2 Ready to Engage"
     elif total >= 40: label = "\U0001f7e1 Needs Nurturing"
@@ -549,21 +526,16 @@ def compute_score(profile: ProfileData, raw_data: dict, posts_data: list) -> dic
     return {
         "score_total":        total,
         "score_label":        label,
-        "score_uncapped":     uncapped,
-        "failed_required":    failed_required,
-        "mutual_min":         R["mutual_min"],
         "score_activity":     score_activity,
         "score_posts":        score_posts,
         "score_engagement":   score_engagement,
         "score_completeness": score_completeness,
         "score_signals":      score_signals,
-        "score_mutuals":      score_mutuals,
         "max_activity":       P["recent_activity"],
         "max_posts":          P["posting_frequency"],
         "max_engagement":     max_engagement,
         "max_completeness":   P["completeness"],
         "max_signals":        P["signals"],
-        "max_mutuals":        P["mutual_connections"],
         "score_raw":          raw_total,
         "score_max":          max_total,
         "avg_engagement":     round(avg_engagement, 1),

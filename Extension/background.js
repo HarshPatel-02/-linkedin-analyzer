@@ -7,13 +7,19 @@ function apiBase() {
     chrome.storage.local.get([LI_SETTINGS_KEY], (r) => res(liApiBase((r && r[LI_SETTINGS_KEY]) || {}))));
 }
 
-// The Apify token set in the popup's Development section, read per request like the
-// URLs above so a newly saved token is used on the very next call.
-function apifyTokenHeader() {
+// The Apify token and the analyzer's server key, both set in the popup's Development
+// section and read per request like the URLs above, so a newly saved value is used on
+// the very next call. A hosted (Render) analyzer refuses a request without the key.
+function devHeaders() {
   return new Promise((res) =>
     chrome.storage.local.get([LI_DEV_KEY], (r) => {
-      const token = (((r && r[LI_DEV_KEY]) || {}).apifyToken || "").trim();
-      res(token ? { "X-Apify-Token": token } : {});
+      const dev = (r && r[LI_DEV_KEY]) || {};
+      const headers = {};
+      const token = String(dev.apifyToken || "").trim();
+      const key = String(dev.apiKey || "").trim();
+      if (token) headers["X-Apify-Token"] = token;
+      if (key) headers["X-Api-Key"] = key;
+      res(headers);
     }));
 }
 
@@ -34,13 +40,13 @@ chrome.runtime.onStartup.addListener(startFollowupAlarm);
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== "li-api") return false;
   (async () => {
-    const timeoutMs = Math.max(5000, Math.min(Number(msg.timeoutMs) || 45000, 170000));
+    const timeoutMs = Math.max(5000, Math.min(Number(msg.timeoutMs) || LI_TIMEOUTS.analyzer, LI_TIMEOUTS.analyzerMax));
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       // Every analyzer call carries the token, GETs included: the analyzer is the one
       // service that talks to Apify, and it no longer reads a token of its own.
-      const init = { method: msg.method || "GET", signal: ctrl.signal, headers: await apifyTokenHeader() };
+      const init = { method: msg.method || "GET", signal: ctrl.signal, headers: await devHeaders() };
       if (msg.body !== undefined) {
         init.headers["Content-Type"] = "application/json";
         init.body = JSON.stringify(msg.body);
@@ -76,14 +82,8 @@ function adminBase() {
 // go to the same endpoint in the same shape.
 const syncBody = (leads) => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leads }) });
 
-const LI_NA_RE = /^(not specified|unknown|no activity data|no recent activity|no projects)$/i;
-const liVal = (...vals) => {
-  for (const v of vals) {
-    const s = String(v == null ? "" : v).trim();
-    if (s && !LI_NA_RE.test(s)) return s;
-  }
-  return "";
-};
+// The first of these that holds a real value (see liClean in leads.js).
+const liVal = (...vals) => vals.map(liClean).find(Boolean) || "";
 
 // A lead record holds only what the lead log tracks, but the full analysis for the
 // same person is already saved under "liScore:<profile url>" (role, country, About,
@@ -104,88 +104,141 @@ async function enrichLeads(leads) {
       country: liVal(lead.country, a.country),
       about: liVal(lead.about, a.about).slice(0, 1200),
       activity: liVal(lead.activity, a.activity),
+      // When that newest post went up and where it is, so the admin's Activity card can
+      // show and link it. Apify's own values, from the stored Activity score.
+      activityDate: liVal(a.activity_date),
+      activityUrl: /^https?:\/\//i.test(String(a.activity_url || "")) ? a.activity_url : "",
     });
   });
 }
 
+// Erase people from this browser: their lead record and every score, form value and
+// outreach draft stored under their profile. `people` are {url, name}.
+async function forgetLocally(people) {
+  const all = await new Promise((res) => chrome.storage.local.get(null, res));
+  const leads = Object.assign({}, (all && all[LI_LEADS_KEY]) || {});
+  const slugs = new Set(people.map((p) => liLeadSlug(p.url) || liLeadSlug(p.name)).filter(Boolean));
+  for (const p of people) {
+    const key = liFindLeadKey(leads, p.url, p.name);
+    if (key) delete leads[key];
+  }
+  const stores = Object.keys(all || {}).filter((k) => /^(liScore|liActForm|liOutreach):/.test(k) && slugs.has(liLeadSlug(k)));
+  await new Promise((res) => chrome.storage.local.set({ [LI_LEADS_KEY]: leads }, res));
+  if (stores.length) await new Promise((res) => chrome.storage.local.remove(stores, res));
+}
+
+// A sync answers with the people deleted in the admin; they go from here too, or the
+// next sync would send them straight back.
+async function dropRemoved(data) {
+  const removed = (data && Array.isArray(data.removed)) ? data.removed : [];
+  if (removed.length) await forgetLocally(removed.map((x) => (/^https?:/i.test(x) ? { url: x, name: "" } : { url: "", name: x })));
+  return data;
+}
+
+class SignedOutError extends Error {}
+
+// Every admin call is made as the signed-in user: their extension key reaches only
+// their own workspace. A refused key (revoked, or the user removed) signs the
+// extension out everywhere, so it asks for a new key instead of failing quietly.
 async function adminFetch(path, init, timeoutMs) {
+  const token = await liGetAuthToken();
+  if (!token) throw new Error("Sign in to the extension first: open it from the toolbar.");
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), Math.max(5000, Math.min(timeoutMs || 15000, 240000)));
+  const timer = setTimeout(() => ctrl.abort(), Math.max(5000, Math.min(timeoutMs || LI_TIMEOUTS.admin, LI_TIMEOUTS.adminMax)));
   try {
     const base = await adminBase();
-    const resp = await fetch(base + path, Object.assign({ signal: ctrl.signal }, init));
+    const opts = Object.assign({ signal: ctrl.signal }, init);
+    opts.headers = Object.assign({}, (init && init.headers) || {}, { Authorization: "Bearer " + token });
+    const resp = await fetch(base + path, opts);
     const data = await resp.json().catch(() => ({}));
+    if (resp.status === 401) {
+      await new Promise((res) => chrome.storage.local.remove([LI_AUTH_KEY, LI_AUTH_TOKEN_KEY], res));
+      throw new SignedOutError("Your sign-in ended (the key was revoked or the account removed). Open the extension and sign in again.");
+    }
     if (!resp.ok) throw new Error(data.detail || "admin backend error " + resp.status);
     return data;
   } catch (e) {
     throw new Error(e && e.name === "AbortError" ? "admin backend timed out"
-      : (e.message || "admin backend unreachable — start it: uvicorn app.main:app --port 8001"));
+      : (e.message || "admin backend unreachable - check the Admin URL in the extension popup"));
   } finally { clearTimeout(timer); }
 }
 
+// A JSON request body for adminFetch.
+const jsonBody = (method, body, extraHeaders) => ({
+  method, headers: Object.assign({ "Content-Type": "application/json" }, extraHeaders || {}), body: JSON.stringify(body),
+});
+
+const storedLeads = async () => ((await liStore.get([LI_LEADS_KEY]))[LI_LEADS_KEY]) || {};
+
+// Every admin action the popup and the content scripts can ask for. Each returns the
+// answer to send back; a thrown error becomes { ok: false, error }.
+const ADMIN_ACTIONS = {
+  status: async () => ({ ok: true, data: await adminFetch("/extension/status") }),
+
+  sync: async () => {
+    const leads = Object.values(await storedLeads());
+    if (!leads.length) return { ok: false, error: "No leads logged yet — analyze a profile first." };
+    return { ok: true, data: await dropRemoved(await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads(leads)) })) };
+  },
+
+  // One freshly scored person, sent the moment content.js saves the score. Fire-and-forget:
+  // the page never waits for this, so a stopped admin just means "sync it later".
+  push: async (msg) => {
+    const leads = await storedLeads();
+    const lead = leads[liFindLeadKey(leads, msg.url, msg.name) || ""];
+    if (!lead || !(lead.name || lead.url)) return { ok: false, error: "nothing to push" };
+    return { ok: true, data: await dropRemoved(await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads([lead])) })) };
+  },
+
+  // Removing a lead in the popup. Erased here first, so it works with the admin switched
+  // off; then the admin erases its copy and remembers the removal.
+  forget: async (msg) => {
+    const person = { url: String(msg.url || ""), name: String(msg.name || "") };
+    await forgetLocally([person]);
+    try {
+      await adminFetch("/extension/forget", jsonBody("POST", person));
+      return { ok: true, admin: true };
+    } catch (e) {
+      return { ok: true, admin: false, error: e.message };
+    }
+  },
+
+  // The published ICPs and which one scores: a few hundred bytes for the dropdown.
+  icps: async () => ({ ok: true, data: { icps: (await adminFetch("/icp/options")) || [] } }),
+
+  // The full rules of the ICP in force, so the panel can show what it scores with.
+  "icp-selected": async () => ({ ok: true, data: await adminFetch("/icp/selected") }),
+
+  // Editing rules publishes a new ICP version; the answer is that published ICP.
+  "save-rules": async (msg) => ({ ok: true, data: await adminFetch("/icp/selected/rules",
+    jsonBody("PUT", { fields: msg.fields || {} }), LI_TIMEOUTS.saveRules) }),
+
+  // Picking in the extension moves the workspace selection, so the admin shows the same ICP.
+  "select-icp": async (msg) => ({ ok: true, data: await adminFetch("/icp/selected",
+    jsonBody("PUT", { icpId: msg.icpId || null })) }),
+
+  // The one call that produces a score: the admin collects (through the analyzer, so the
+  // Apify token and server key ride along), scores against the selected ICP and stores it.
+  analyze: async (msg) => ({ ok: true, data: await adminFetch("/extension/analyze", jsonBody("POST", {
+    profileUrl: msg.profileUrl || "", scraped: msg.scraped || {},
+    collect: msg.collect !== false, icpId: msg.icpId || null,
+  }, await devHeaders()), LI_TIMEOUTS.adminAnalyze) }),
+
+  // This user's own Activity points and keywords, kept in their workspace in the admin.
+  "activity-settings": async () => ({ ok: true, data: await adminFetch("/me/activity-settings") }),
+  "save-activity-settings": async (msg) => ({ ok: true, data: await adminFetch("/me/activity-settings",
+    jsonBody("PUT", { points: msg.points || {}, keywords: msg.keywords || {} })) }),
+
+  // One lead as the admin holds it now, so a stored ICP score can catch up with a re-score.
+  lead: async (msg) => ({ ok: true, data: await adminFetch("/leads/" + encodeURIComponent(String(msg.leadId || ""))) }),
+};
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== "li-admin") return false;
-  (async () => {
-    try {
-      if (msg.action === "status") {
-        sendResponse({ ok: true, data: await adminFetch("/extension/status") });
-      } else if (msg.action === "sync") {
-        const r = await new Promise((res) => chrome.storage.local.get([LI_LEADS_KEY], res));
-        const leads = Object.values(r[LI_LEADS_KEY] || {});
-        if (!leads.length) { sendResponse({ ok: false, error: "No leads logged yet — analyze a profile first." }); return; }
-        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads(leads)) }) });
-      } else if (msg.action === "icps") {
-        // One small response: the published ICPs and which of them is scoring.
-        // Fetching the full ICP list plus the selection separately pulled ~13 KB of
-        // rule configuration to fill a dropdown that needs a few hundred bytes.
-        const list = await adminFetch("/icp/options");
-        sendResponse({ ok: true, data: { icps: list || [] } });
-      } else if (msg.action === "icp-selected") {
-        // The full rules of the ICP in force, so the panel can show what it scores
-        // with. The options list deliberately carries no configuration.
-        sendResponse({ ok: true, data: await adminFetch("/icp/selected") });
-      } else if (msg.action === "save-rules") {
-        // Editing rules publishes a new ICP version, so the admin reads exactly what
-        // was saved here. The response is that published ICP.
-        sendResponse({ ok: true, data: await adminFetch("/icp/selected/rules", {
-          method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fields: msg.fields || {} }),
-        }, 30000) });
-      } else if (msg.action === "select-icp") {
-        // Picking in the extension moves the workspace selection, so the admin
-        // panel shows the same ICP rather than its own stale choice.
-        sendResponse({ ok: true, data: await adminFetch("/icp/selected", {
-          method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ icpId: msg.icpId || null }),
-        }) });
-      } else if (msg.action === "analyze") {
-        // The one call that produces a score: the admin collects, scores against
-        // the selected ICP, stores the result and returns it. Collection runs
-        // several LinkedIn fetches, so it gets a long timeout.
-        // Collection happens in the analyzer, reached through the admin, so the admin
-        // relays the token. This is the only admin call that carries it.
-        sendResponse({ ok: true, data: await adminFetch("/extension/analyze", {
-          method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, await apifyTokenHeader()),
-          body: JSON.stringify({
-            profileUrl: msg.profileUrl || "", scraped: msg.scraped || {},
-            collect: msg.collect !== false, icpId: msg.icpId || null,
-          }),
-        }, 220000) });
-      } else if (msg.action === "push") {
-        // One freshly scored person, sent the moment content.js saves the score.
-        // Fire-and-forget: the page never waits for this and never shows its errors,
-        // so a stopped admin panel just means "sync it later" (the popup button).
-        const r = await new Promise((res) => chrome.storage.local.get([LI_LEADS_KEY], res));
-        const leads = r[LI_LEADS_KEY] || {};
-        const lead = leads[liFindLeadKey(leads, msg.url, msg.name) || ""];
-        if (!lead || !(lead.name || lead.url)) { sendResponse({ ok: false, error: "nothing to push" }); return; }
-        sendResponse({ ok: true, data: await adminFetch("/extension/sync", { method: "POST", ...syncBody(await enrichLeads([lead])) }) });
-      } else {
-        sendResponse({ ok: false, error: "unknown admin action" });
-      }
-    } catch (e) { sendResponse({ ok: false, error: e.message }); }
-  })();
-  return true;
+  const action = Object.prototype.hasOwnProperty.call(ADMIN_ACTIONS, msg.action) ? ADMIN_ACTIONS[msg.action] : null;
+  if (!action) { sendResponse({ ok: false, error: "unknown admin action" }); return false; }
+  action(msg).then(sendResponse, (e) => sendResponse({ ok: false, error: e.message }));
+  return true;   // keep the channel open for the async reply
 });
 
 // ─── Sign in from the page ────────────────────────────────────────────────────
